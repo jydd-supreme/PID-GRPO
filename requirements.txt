@@ -1,0 +1,5 @@
+# Lightweight first-round dependencies only. Training dependencies are intentionally optional.
+PyYAML>=6.0
+pytest==8.3.5
+
+# Real training uses requirements-training.lock. Do not add unpinned HF packages here.

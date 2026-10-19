@@ -1,0 +1,1 @@
+"""PID-GRPO research scaffold."""

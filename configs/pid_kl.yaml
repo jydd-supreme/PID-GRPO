@@ -1,0 +1,6 @@
+extends: base.yaml
+control:
+  mode: pid_kl
+  beta: 0.04
+training:
+  enabled: false

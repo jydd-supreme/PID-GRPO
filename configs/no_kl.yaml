@@ -1,0 +1,6 @@
+extends: base.yaml
+control:
+  mode: no_kl
+  beta: 0.0
+training:
+  enabled: false

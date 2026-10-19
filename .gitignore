@@ -1,0 +1,55 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.cache/
+outputs/*
+!outputs/**/.gitkeep
+data/train/*
+data/control/*
+data/domain_validation/*
+data/final_test/*
+!data/**/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.*
+
+# API Keys and Secrets
+*.pem
+*.key
+secrets.json
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Training outputs
+checkpoints/
+outputs/
+wandb/
+runs/
+logs/
+
+# Large datasets
+data/
+datasets/
+
+# Cache
+.cache/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store

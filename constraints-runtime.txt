@@ -1,0 +1,4 @@
+# Supplied by the AutoDL CUDA 12.4 base image. This local-version constraint
+# prevents pip from replacing the CUDA build with a PyPI CPU/default wheel.
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124

@@ -1,0 +1,7 @@
+extends: base.yaml
+control:
+  mode: fixed_kl
+  beta: 0.04
+  fixed_beta: 0.04
+training:
+  enabled: false

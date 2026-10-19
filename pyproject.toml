@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pid-grpo"
+version = "0.1.0"
+description = "Risk-aware PID control scaffold for GRPO KL regularization"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5"]
+plot = ["matplotlib>=3.7"]
+training = [
+    "torch==2.5.1",
+    "transformers==4.49.0",
+    "trl==0.15.2",
+    "datasets==3.3.2",
+    "peft==0.14.0",
+    "accelerate==1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
