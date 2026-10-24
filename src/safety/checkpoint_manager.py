@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path
 import shutil
 from typing import Any, Callable, Mapping, Protocol
@@ -65,6 +66,33 @@ class CheckpointManager:
             if record.safety_verified and record.domain_validation_score is not None
         ]
         return max(eligible, key=lambda item: item.domain_validation_score, default=None)
+
+    def best_feasible_among(self, checkpoint_ids: set[str]) -> CheckpointRecord | None:
+        return max(
+            (
+                record for record in self.records
+                if record.checkpoint_id in checkpoint_ids
+                and record.safety_verified
+                and record.domain_validation_score is not None
+                and math.isfinite(record.domain_validation_score)
+            ),
+            key=lambda record: (record.domain_validation_score, record.optimizer_step),
+            default=None,
+        )
+
+    def latest_rollback_candidate(
+        self, minimum_score: float, checkpoint_ids: set[str]
+    ) -> CheckpointRecord | None:
+        return max(
+            (
+                record for record in self.records
+                if record.checkpoint_id in checkpoint_ids
+                and record.safety_verified
+                and record.capability_score >= minimum_score
+            ),
+            key=lambda record: record.optimizer_step,
+            default=None,
+        )
 
     def save(
         self,
@@ -135,8 +163,15 @@ class CheckpointManager:
         self.rollback_request = None
         self._write_manifest()
 
-    def request_rollback(self, reason: str) -> RollbackRequest:
-        target = self.latest_safe
+    def request_rollback(
+        self, reason: str, *, minimum_score: float | None = None,
+        checkpoint_ids: set[str] | None = None,
+    ) -> RollbackRequest:
+        target = (
+            self.latest_safe
+            if minimum_score is None or checkpoint_ids is None
+            else self.latest_rollback_candidate(minimum_score, checkpoint_ids)
+        )
         request = RollbackRequest(
             requested=True,
             reason=reason,

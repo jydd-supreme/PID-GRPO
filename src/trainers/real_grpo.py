@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from importlib.metadata import version
+import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -84,6 +86,17 @@ def _load_and_check_splits(data_config: Mapping[str, Any]) -> dict[str, list[dic
                 )
             seen[sample_id] = split_name
     return splits
+
+
+def _record_metadata(record: Any, beta: float) -> dict[str, Any]:
+    return {
+        "checkpoint_id": record.checkpoint_id,
+        "optimizer_step": record.optimizer_step,
+        "capability_score": record.capability_score,
+        "domain_validation_score": record.domain_validation_score,
+        "beta": beta,
+        "checkpoint_path": record.path,
+    }
 
 
 def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -230,38 +243,120 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         metrics_path=output_dir / "metrics" / "training.csv",
     )
     trainer.add_callback(callback)
-    trainer.train()
+    recovery = safety["recovery"]
+    initial_interval = loop.interval
+    attempts = 0
+    resume_path: Path | None = None
+    max_steps = int(training["max_steps"])
+    while True:
+        if resume_path is None:
+            trainer.train()
+        else:
+            trainer.train(resume_from_checkpoint=str(resume_path))
+        rollback = manager.rollback_request
+        if rollback is None:
+            if loop.stop_requested:
+                raise RuntimeError("training stopped for safety and rollback is disabled")
+            if int(trainer.state.global_step) != max_steps or loop.optimizer_step != max_steps:
+                raise RuntimeError("training ended before the requested optimizer-step budget")
+            break
 
-    rollback = manager.rollback_request
-    if loop.stop_requested and rollback is None:
-        raise RuntimeError("training stopped for safety and rollback is disabled")
-    if rollback is not None:
         if rollback.target_checkpoint_id is None:
-            raise RuntimeError("safety stop requested but no safe checkpoint exists")
-        record = next(r for r in manager.records if r.checkpoint_id == rollback.target_checkpoint_id)
-        state_io.restore(record.path)
-        loop.restore_protocol_state(record.checkpoint_id)
+            return {"status": "stopped_hard", "reason": "no eligible rollback checkpoint"}
+        failed_beta = loop.beta_adapter.beta
+        rollback_count = loop.rollback_count
+        candidate_id = rollback.target_checkpoint_id
+        recovered = None
+        record = None
+        while candidate_id is not None:
+            record = next(r for r in manager.records if r.checkpoint_id == candidate_id)
+            state_io.restore(record.path)
+            loop.restore_protocol_state(record.checkpoint_id)
+            try:
+                recovered = evaluator.evaluate(trainer.model, control_dataset)
+            except Exception as exc:
+                recovered = {"valid": False, "error": f"{type(exc).__name__}: {exc}"}
+            decision = guard.evaluate(recovered)
+            if decision.allow_training and float(recovered["overall_score"]) >= thresholds.warn:
+                break
+            earlier_ids = {
+                checkpoint_id for checkpoint_id in loop.active_checkpoint_ids
+                if next(r for r in manager.records if r.checkpoint_id == checkpoint_id).optimizer_step
+                < record.optimizer_step
+            }
+            earlier = manager.latest_rollback_candidate(thresholds.warn, earlier_ids)
+            candidate_id = earlier.checkpoint_id if earlier is not None else None
+        if candidate_id is None or record is None:
+            return {"status": "stopped_hard", "reason": "rollback re-evaluation failed"}
         manager.clear_rollback_request()
-        recovered = evaluator.evaluate(trainer.model, control_dataset)
-        if guard.evaluate(recovered).allow_training is not True:
-            raise RuntimeError(f"rollback re-evaluation did not recover capability: {recovered}")
-        return {
-            "status": "rolled_back",
-            "checkpoint_id": record.checkpoint_id,
-            "control": recovered,
-        }
+        if attempts >= int(recovery["max_retries"]):
+            return {
+                "status": "stopped_hard",
+                "reason": "recovery retry limit reached",
+                "restored_checkpoint_id": record.checkpoint_id,
+                "control": recovered,
+            }
+        if mode is not KLMode.PID_KL:
+            return {
+                "status": "stopped_hard",
+                "reason": "automatic continuation requires pid_kl",
+                "restored_checkpoint_id": record.checkpoint_id,
+            }
+        attempts += 1
+        loop.begin_recovery(
+            failed_beta * float(recovery["beta_backoff"]),
+            rollback_count, attempts, int(recovery["hold_evaluations"]),
+        )
+        new_interval = max(1, math.ceil(
+            initial_interval * float(recovery["interval_backoff"]) ** attempts
+        ))
+        callback.configure_recovery(
+            lr_multiplier=float(recovery["lr_backoff"]) ** attempts,
+            interval=new_interval,
+        )
+        resume_path = state_io.resume_path(record.path)
 
-    best = manager.best_feasible or manager.latest_safe
+    active_ids = set(loop.active_checkpoint_ids)
+    last = next(
+        (
+            record for record in manager.records
+            if record.checkpoint_id in active_ids and record.optimizer_step == max_steps
+            and record.safety_verified
+        ),
+        None,
+    )
+    if last is None:
+        raise RuntimeError("final optimizer step has no verified capability checkpoint")
+    best = manager.best_feasible_among(active_ids)
     if best is None:
-        raise RuntimeError("training completed without a safety-verified checkpoint")
+        raise RuntimeError("training completed without a valid domain-validation checkpoint")
+
+    # The live model is the last optimizer step. Export it before selecting
+    # best-feasible; the old path overwrote the final weights by restoring best.
+    last_beta = loop.beta_adapter.beta
+    last_dir = output_dir / "last_model"
+    trainer.save_model(str(last_dir))
+    tokenizer.save_pretrained(str(last_dir))
     state_io.restore(best.path)
     loop.restore_protocol_state(best.checkpoint_id)
     final_result = evaluator.evaluate(trainer.model, splits["final_test_file"])
-    final_dir = output_dir / "final_model"
-    trainer.save_model(str(final_dir))
-    tokenizer.save_pretrained(str(final_dir))
-    return {
+    best_dir = output_dir / "best_model"
+    trainer.save_model(str(best_dir))
+    tokenizer.save_pretrained(str(best_dir))
+    summary = {
         "status": "complete",
-        "checkpoint_id": best.checkpoint_id,
-        "final_test": final_result,
+        "attempts": attempts,
+        "best_feasible": _record_metadata(best, loop.beta_adapter.beta),
+        "last_step": _record_metadata(last, last_beta),
+        "final_test_best": final_result,
+        "best_model_path": str(best_dir),
+        "last_model_path": str(last_dir),
+    }
+    metadata_path = output_dir / "model_selection.json"
+    temporary_path = metadata_path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    temporary_path.replace(metadata_path)
+    return {
+        **summary,
+        "selection_metadata": str(metadata_path),
     }

@@ -26,6 +26,12 @@ class PIDControlCallback:
             def on_step_end(self, args, state, control, **callback_kwargs):
                 return self._impl.on_step_end(args, state, control, **callback_kwargs)
 
+            def on_pre_optimizer_step(self, args, state, control, **callback_kwargs):
+                return self._impl.on_pre_optimizer_step(args, state, control, **callback_kwargs)
+
+            def configure_recovery(self, *, lr_multiplier: float, interval: int) -> None:
+                self._impl.configure_recovery(lr_multiplier=lr_multiplier, interval=interval)
+
         return _Callback(*args, **kwargs)
 
 
@@ -51,6 +57,26 @@ class _PIDControlCallbackImpl:
         self.metrics = CSVMetricLogger(metrics_path) if metrics_path else None
         self.data_source = data_source
         self.last_global_step = 0
+        self.lr_multiplier = 1.0
+        self.effective_learning_rate: float | None = None
+
+    def configure_recovery(self, *, lr_multiplier: float, interval: int) -> None:
+        if not 0.0 < lr_multiplier <= 1.0 or interval < 1:
+            raise ValueError("invalid recovery learning-rate multiplier or interval")
+        self.lr_multiplier = lr_multiplier
+        self.loop.interval = interval
+
+    def on_pre_optimizer_step(self, args: Any, state: Any, control: Any, **_: Any) -> Any:
+        optimizer = self.trainer.optimizer
+        if optimizer is None:
+            raise RuntimeError("optimizer is unavailable at the update boundary")
+        # Trainer's scheduler writes the unscaled scheduled LR after each step.
+        # Apply the recovery factor immediately before optimizer.step(), so it
+        # does not compound across steps or get lost when the scheduler advances.
+        for group in optimizer.param_groups:
+            group["lr"] *= self.lr_multiplier
+        self.effective_learning_rate = optimizer.param_groups[0]["lr"]
+        return control
 
     def on_train_begin(self, args: Any, state: Any, control: Any, **_: Any) -> Any:
         if not self.loop.checkpoint_manager.records:
@@ -68,7 +94,7 @@ class _PIDControlCallbackImpl:
         self.last_global_step = global_step
         domain_score = None
         if (
-            global_step % self.loop.interval == 0
+            (global_step % self.loop.interval == 0 or global_step >= int(args.max_steps))
             and self.domain_evaluator is not None
             and self.domain_dataset is not None
         ):
@@ -85,6 +111,7 @@ class _PIDControlCallbackImpl:
             trainer_state={"global_step": global_step},
             optimizer_state={"external_hf_state": True},
             domain_validation_score=domain_score,
+            force_evaluate=global_step >= int(args.max_steps),
         )
         if event.evaluated:
             self._log_event(event)
@@ -123,6 +150,7 @@ class _PIDControlCallbackImpl:
                 "beta_old": pid.get("beta_old", event.beta),
                 "beta_new": event.beta,
                 "rollback_count": self.loop.rollback_count,
+                "learning_rate": self.effective_learning_rate,
                 "data_source": self.data_source,
             },
         )

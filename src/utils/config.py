@@ -53,9 +53,24 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if int(control["eval_interval_optimizer_steps"]) < 1:
         raise ValueError("eval interval must be >= 1 optimizer update")
     PIDConfig(**control["pid"])
+    recovery = safety["recovery"]
+    if int(recovery["max_retries"]) < 0 or int(recovery["hold_evaluations"]) < 1:
+        raise ValueError("invalid recovery retry or hold setting")
+    if float(recovery["beta_backoff"]) < 1:
+        raise ValueError("recovery.beta_backoff must be >= 1")
+    if not 0 < float(recovery["lr_backoff"]) < 1:
+        raise ValueError("recovery.lr_backoff must be in (0, 1)")
+    if not 0 < float(recovery["interval_backoff"]) < 1:
+        raise ValueError("recovery.interval_backoff must be in (0, 1)")
     training = config["training"]
     if not isinstance(training.get("enabled"), bool):
         raise ValueError("training.enabled must be a boolean")
+    if training["enabled"] and (
+        not safety["hard_stop_enabled"] or not safety["rollback_enabled"]
+    ):
+        raise ValueError("real training requires Hard stop and rollback protection")
+    if int(training["max_steps"]) < 1:
+        raise ValueError("max_steps must be positive")
     if int(training["per_device_train_batch_size"]) < 1:
         raise ValueError("per_device_train_batch_size must be positive")
     if int(training["gradient_accumulation_steps"]) < 1:

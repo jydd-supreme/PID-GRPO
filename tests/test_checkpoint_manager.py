@@ -16,10 +16,13 @@ class State:
         self.value = state["value"]
 
 
-def save(manager: CheckpointManager, name: str, step: int, safe: bool, domain: float):
+def save(
+    manager: CheckpointManager, name: str, step: int, safe: bool, domain: float,
+    capability: float = 0.99,
+):
     state = State(step).state_dict()
     return manager.save(
-        name, optimizer_step=step, control_step=step, capability_score=0.99,
+        name, optimizer_step=step, control_step=step, capability_score=capability,
         domain_validation_score=domain, safety_verified=safe, pid_state=state,
         safety_state=state, trainer_state=state, optimizer_state=state,
     )
@@ -66,3 +69,15 @@ def test_artifacts_are_written_before_checkpoint_is_published(tmp_path: Path) ->
         artifact_writer=write_artifact,
     )
     assert (Path(record.path) / "weights.marker").read_text(encoding="utf-8") == "complete"
+
+
+def test_recovery_only_uses_warn_safe_checkpoints_from_active_trajectory(tmp_path: Path) -> None:
+    manager = CheckpointManager(tmp_path)
+    save(manager, "first", 1, True, 0.5, capability=0.95)
+    save(manager, "below-warn", 2, True, 0.9, capability=0.91)
+    save(manager, "obsolete-branch", 3, True, 1.0, capability=0.96)
+    active = {"first", "below-warn"}
+    assert manager.request_rollback(
+        "hard", minimum_score=0.92, checkpoint_ids=active,
+    ).target_checkpoint_id == "first"
+    assert manager.best_feasible_among(active).checkpoint_id == "below-warn"

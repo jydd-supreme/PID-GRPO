@@ -79,6 +79,12 @@ def test_hf_checkpoint_restores_model_optimizer_scheduler_and_state(tmp_path: Pa
     expected = {name: value.detach().clone() for name, value in trainer.model.state_dict().items()}
     io = HFTrainingStateIO(trainer, Processing())
     io.save(tmp_path)
+    resume_dir = io.resume_path(tmp_path)
+    assert (resume_dir / "pytorch_model.bin").exists()
+    assert (resume_dir / "optimizer.pt").exists()
+    assert (resume_dir / "scheduler.pt").exists()
+    assert (resume_dir / "trainer_state.json").exists()
+    assert (resume_dir / "rng_state.pth").exists()
     with torch.no_grad():
         for parameter in trainer.model.parameters():
             parameter.add_(10)

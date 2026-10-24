@@ -7,14 +7,18 @@
 ```text
 optimizer.step()
   -> PIDGRPOControlLoop.after_optimizer_step()
-     -> 到达 K? -- 否 -> 返回
+     -> 到达 K 或 max_steps? -- 否 -> 返回
      -> CapabilityEvaluator(D_control)
      -> SafetyGuard(raw result)
-        -> HARD/INVALID -> stop + rollback request
+        -> HARD/INVALID -> stop + Warn 以上的当前分支 checkpoint 回退请求
         -> SAFE/BUFFER/WARNING
            -> PIDController.update()（仅 pid_kl）
            -> DynamicBetaAdapter.set_beta()
            -> save safety-verified checkpoint
+
+回退后复测，合格且未耗尽重试次数时，从对应 Trainer checkpoint 续训；
+提高短期 KL 下限、收紧学习率和评测间隔。达到固定步数后分别导出
+`last_model` 与当前有效分支中 domain validation 最优的 `best_model`。
 ```
 
 ## 关键接口

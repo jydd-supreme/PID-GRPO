@@ -7,14 +7,14 @@ import math
 from typing import Any
 
 from src.safety.risk_gate import PiecewiseLinearRiskGate
-from src.safety.thresholds import SafetyState, SafetyThresholds
+from src.safety.thresholds import SafetyThresholds
 
 
 @dataclass(frozen=True)
 class PIDConfig:
-    kp: float = 2.0
-    ki: float = 0.2
-    kd: float = 1.0
+    kp: float = 0.2
+    ki: float = 0.05
+    kd: float = 0.2
     beta_min: float = 0.001
     beta_max: float = 1.0
     max_beta_multiplier: float = 2.0
@@ -40,8 +40,8 @@ class PIDConfig:
             raise ValueError("invalid deadband or integral bounds")
         if not 0 <= self.safe_integral_leak <= 1:
             raise ValueError("safe_integral_leak must be in [0, 1]")
-        if not 0 <= self.safe_release_rate <= 1:
-            raise ValueError("safe_release_rate must be in [0, 1]")
+        if not 0 <= self.safe_release_rate < 1:
+            raise ValueError("safe_release_rate must be in [0, 1)")
         if self.warmup_control_steps < 0:
             raise ValueError("warmup_control_steps must be >= 0")
 
@@ -61,11 +61,11 @@ class PIDUpdate:
     control_output: float
     safety_state: str
     warmup: bool
-    released_toward_base: bool
+    released_kl: bool
 
 
 class PIDController:
-    """Stateful PID where P/I are risk-gated and D can intervene early."""
+    """Track Warn with signed P, conditional I and an early trend brake."""
 
     def __init__(
         self,
@@ -89,6 +89,26 @@ class PIDController:
         self.previous_ema: float | None = None
         self.filtered_derivative = 0.0
         self.control_step = 0
+        self.recovery_beta_floor: float | None = None
+        self.recovery_safe_streak = 0
+        self.recovery_hold_evaluations = 0
+
+    def begin_recovery(self, failed_beta: float, hold_evaluations: int = 2) -> None:
+        """Keep stronger KL temporarily after a verified rollback."""
+        if hold_evaluations < 1 or not math.isfinite(failed_beta) or failed_beta <= 0:
+            raise ValueError("invalid recovery settings")
+        self.recovery_beta_floor = min(
+            self.config.beta_max,
+            self.beta * self.config.max_beta_multiplier,
+            max(self.beta, failed_beta),
+        )
+        self.beta = max(self.beta, self.recovery_beta_floor)
+        self.integral_error = 0.0
+        self.previous_ema = None
+        self.capability_ema = None
+        self.filtered_derivative = 0.0
+        self.recovery_safe_streak = 0
+        self.recovery_hold_evaluations = hold_evaluations
 
     def update(self, capability: float) -> PIDUpdate:
         if not math.isfinite(capability):
@@ -104,18 +124,17 @@ class PIDController:
         # whether a benchmark reports capability on a 0-1 or 0-100 scale.
         normalization_scale = self.thresholds.warn - self.thresholds.hard
         normalized_error = (self.thresholds.warn - ema) / normalization_scale
-        error = (
-            0.0
-            if abs(normalized_error) <= cfg.deadband
-            else max(0.0, normalized_error)
-        )
+        error = 0.0 if abs(normalized_error) <= cfg.deadband else normalized_error
         # PID regions use the filtered signal; the independent guard already
         # enforces hard safety on the unfiltered raw measurement.
         state = self.thresholds.classify(ema)
 
-        if state is SafetyState.SAFE:
+        old_integral = self.integral_error
+        self.control_step += 1
+        warmup = self.control_step <= cfg.warmup_control_steps
+        if error <= 0.0:
             self.integral_error *= cfg.safe_integral_leak
-        else:
+        elif not warmup and self.beta < cfg.beta_max:
             candidate = self.integral_error + error
             self.integral_error = min(max(candidate, cfg.integral_min), cfg.integral_max)
 
@@ -132,27 +151,40 @@ class PIDController:
         i_term = cfg.ki * self.integral_error
         d_term = cfg.kd * self.filtered_derivative
         risk = self.risk_gate(ema, self.thresholds)
-        output = risk * (p_term + i_term) + d_term
+        # Above Warn, negative P releases KL so training can use the allowed
+        # degradation budget. A falling trend can override that release.
+        output = risk * (max(p_term, 0.0) + i_term) + (1.0 - risk) * min(p_term, 0.0) + d_term
 
-        self.control_step += 1
-        warmup = self.control_step <= cfg.warmup_control_steps
-        released = False
+        # Warm-up freezes I/D but never suppresses a first P safety action.
         if warmup:
-            new_beta = old_beta
-            output = 0.0
-        else:
-            # Clamp in log space before exp to make even extreme gains/scores safe.
-            log_rate_limit = math.log(cfg.max_beta_multiplier)
-            rate_limited_output = min(max(output, -log_rate_limit), log_rate_limit)
-            proposed = old_beta * math.exp(rate_limited_output)
-            lower_rate = old_beta / cfg.max_beta_multiplier
-            upper_rate = old_beta * cfg.max_beta_multiplier
-            new_beta = min(max(proposed, lower_rate), upper_rate)
-            new_beta = min(max(new_beta, cfg.beta_min), cfg.beta_max)
-            if state is SafetyState.SAFE and output <= 0.0:
-                new_beta = old_beta + cfg.safe_release_rate * (self.base_beta - old_beta)
-                new_beta = min(max(new_beta, cfg.beta_min), cfg.beta_max)
-                released = not math.isclose(new_beta, old_beta)
+            output -= risk * i_term + d_term
+        log_rate_limit = math.log(cfg.max_beta_multiplier)
+        # The release limit is a per-evaluation fraction, independent of the
+        # positive emergency rate limit.
+        log_release_limit = -math.log1p(-cfg.safe_release_rate)
+        rate_limited_output = min(max(output, -min(log_rate_limit, log_release_limit)), log_rate_limit)
+        new_beta = min(max(old_beta * math.exp(rate_limited_output), cfg.beta_min), cfg.beta_max)
+        if new_beta >= cfg.beta_max and self.integral_error > old_integral:
+            self.integral_error = old_integral
+            i_term = cfg.ki * self.integral_error
+            output = risk * (max(p_term, 0.0) + i_term) + (1.0 - risk) * min(p_term, 0.0) + d_term
+            if warmup:
+                output -= risk * i_term + d_term
+            rate_limited_output = min(
+                max(output, -min(log_rate_limit, log_release_limit)), log_rate_limit
+            )
+            new_beta = min(
+                max(old_beta * math.exp(rate_limited_output), cfg.beta_min), cfg.beta_max
+            )
+        if self.recovery_beta_floor is not None:
+            new_beta = max(new_beta, self.recovery_beta_floor)
+            if capability >= self.thresholds.warn:
+                self.recovery_safe_streak += 1
+                if self.recovery_safe_streak >= self.recovery_hold_evaluations:
+                    self.recovery_beta_floor = None
+            else:
+                self.recovery_safe_streak = 0
+        released = new_beta < old_beta
         self.beta = new_beta
         return PIDUpdate(
             beta_old=old_beta,
@@ -168,14 +200,14 @@ class PIDController:
             control_output=output,
             safety_state=state.value,
             warmup=warmup,
-            released_toward_base=released,
+            released_kl=released,
         )
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            # Version 2 uses normalized error/integral/derivative state. Version
-            # 1 states used raw capability units and are intentionally rejected.
-            "version": 2,
+            # Version 3 adds signed P and recovery state. Older controller
+            # states are intentionally rejected rather than silently migrated.
+            "version": 3,
             "config": asdict(self.config),
             "beta": self.beta,
             "base_beta": self.base_beta,
@@ -184,10 +216,13 @@ class PIDController:
             "previous_ema": self.previous_ema,
             "filtered_derivative": self.filtered_derivative,
             "control_step": self.control_step,
+            "recovery_beta_floor": self.recovery_beta_floor,
+            "recovery_safe_streak": self.recovery_safe_streak,
+            "recovery_hold_evaluations": self.recovery_hold_evaluations,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        if state.get("version") != 2:
+        if state.get("version") != 3:
             raise ValueError("unsupported PID state version")
         if state.get("config") != asdict(self.config):
             raise ValueError("PID state config does not match controller config")
@@ -201,3 +236,6 @@ class PIDController:
         self.previous_ema = state["previous_ema"]
         self.filtered_derivative = float(state["filtered_derivative"])
         self.control_step = int(state["control_step"])
+        self.recovery_beta_floor = state["recovery_beta_floor"]
+        self.recovery_safe_streak = int(state["recovery_safe_streak"])
+        self.recovery_hold_evaluations = int(state["recovery_hold_evaluations"])

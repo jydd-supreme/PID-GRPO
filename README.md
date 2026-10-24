@@ -80,8 +80,8 @@ python3 scripts/train.py \
 5. `pid_kl` 更新 TRL loss 实际读取的 `trainer.beta`；另外两种模式保持不变量。
 6. 安全点原子保存模型/LoRA、tokenizer、optimizer、scheduler、TrainerState、
    Python/NumPy/CPU/CUDA RNG、PID、Guard 和控制循环状态。
-7. Hard/Invalid 时停止训练、恢复 latest-safe，并重新评测；复测失败则终止。
-8. 正常结束时恢复 best-feasible checkpoint，再且仅再评测一次 final test。
+7. Hard/Invalid 时停止当前尝试，回退到当前分支最近的 Warn 以上 checkpoint 并重新评测；通过后以更强 KL、更低学习率、更密集评测继续剩余步数，重试次数有上限。
+8. 最后一步即使不在 `K` 的整数倍也强制评测；完成后分别导出 `last_model` 和按 domain validation 选出的 `best_model`，final test 只评测后者。选择信息写入 `model_selection.json`。
 
 当前真实入口明确限制为单 GPU。DDP/FSDP/DeepSpeed 下的 beta 广播、rank barrier
 和分布式恢复尚未验证，因此会 fail fast。
@@ -94,9 +94,12 @@ g_warn = (1 - warn_ratio * d_max) * g0
 g_hard = (1 - d_max) * g0
 ```
 
-PID 使用 Warning–Hard 区间归一化后的 EMA 单侧误差。P/I 经连续 Risk Gate
-加权，D 项可在 Warning 前响应下降趋势；beta 按乘性更新并受全局边界和单周期
-倍率限制。离散评测只能约束被测时刻，不能证明两个评测点之间从未短暂越界。
+真实配置 `d_max=5%`，默认 Safe/Warn/Hard 分别为基线的 97.5%/96%/95%。
+Warn 本身就是 Hard 上方的余量，不再叠加另一个目标余量。PID 使用
+Warning–Hard 区间归一化后的 EMA 正负误差：高于 Warn 时 P 可释放 KL，
+低于 Warn 时 P 加强 KL；I 只在低于 Warn 时累积，D 可提前响应下降趋势。
+beta 按乘性更新并受全局边界和单次变化率限制。离散评测只能约束被测时刻，
+不能证明两个评测点之间从未短暂越界，也不能保证一定收敛到 Warn。
 
 ## 验证
 

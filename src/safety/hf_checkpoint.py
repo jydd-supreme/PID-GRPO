@@ -28,11 +28,12 @@ class HFTrainingStateIO:
         import torch
 
         root = checkpoint_directory / self.ARTIFACT_DIR
-        model_dir = root / "model"
         root.mkdir(parents=True, exist_ok=False)
-        self.trainer.save_model(str(model_dir))
+        # Match the pinned Transformers Trainer checkpoint layout so train()
+        # can resume its global step, dataloader position and scheduler itself.
+        self.trainer.save_model(str(root))
         if self.processing_class is not None:
-            self.processing_class.save_pretrained(str(model_dir))
+            self.processing_class.save_pretrained(str(root))
         if self.trainer.optimizer is None:
             raise RuntimeError("optimizer must exist before a real checkpoint is saved")
         torch.save(self.trainer.optimizer.state_dict(), root / "optimizer.pt")
@@ -43,10 +44,10 @@ class HFTrainingStateIO:
             {
                 "python": random.getstate(),
                 "numpy": np.random.get_state(),
-                "torch_cpu": torch.get_rng_state(),
-                "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                "cpu": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
             },
-            root / "rng_state.pt",
+            root / "rng_state.pth",
         )
         (root / "runtime.json").write_text(
             json.dumps(
@@ -67,9 +68,9 @@ class HFTrainingStateIO:
         from transformers import TrainerState
 
         root = Path(checkpoint_directory) / self.ARTIFACT_DIR
-        model_dir = root / "model"
         if not root.is_dir():
             raise FileNotFoundError(root)
+        model_dir = root / "model" if (root / "model").is_dir() else root
         # Trainer owns the PEFT/full-model distinction and applies the correct
         # adapter or model state loader for the pinned Transformers release.
         self.trainer._load_from_checkpoint(str(model_dir))
@@ -84,9 +85,24 @@ class HFTrainingStateIO:
                 torch.load(scheduler_path, map_location="cpu", weights_only=False)
             )
         self.trainer.state = TrainerState.load_from_json(str(root / "trainer_state.json"))
-        rng = torch.load(root / "rng_state.pt", map_location="cpu", weights_only=False)
+        rng_path = root / "rng_state.pth"
+        if not rng_path.exists():
+            rng_path = root / "rng_state.pt"
+        rng = torch.load(rng_path, map_location="cpu", weights_only=False)
         random.setstate(rng["python"])
         np.random.set_state(rng["numpy"])
-        torch.set_rng_state(rng["torch_cpu"])
-        if torch.cuda.is_available() and rng["torch_cuda"]:
-            torch.cuda.set_rng_state_all(rng["torch_cuda"])
+        torch.set_rng_state(rng.get("cpu", rng.get("torch_cpu")))
+        if torch.cuda.is_available():
+            if rng_path.name == "rng_state.pt" and rng.get("torch_cuda"):
+                torch.cuda.set_rng_state_all(rng["torch_cuda"])
+            elif rng.get("cuda") is not None:
+                torch.cuda.set_rng_state(rng["cuda"])
+
+    @classmethod
+    def resume_path(cls, checkpoint_directory: str | Path) -> Path:
+        root = Path(checkpoint_directory) / cls.ARTIFACT_DIR
+        if not (root / "trainer_state.json").is_file():
+            raise FileNotFoundError(root / "trainer_state.json")
+        if (root / "model").exists():
+            raise RuntimeError("legacy checkpoint layout cannot resume Trainer.train")
+        return root

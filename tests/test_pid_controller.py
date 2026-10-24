@@ -42,16 +42,44 @@ def test_bounds_and_rate_limit() -> None:
     assert controller.beta <= 0.5
 
 
-def test_warmup_and_safe_release() -> None:
+def test_warmup_preserves_immediate_p_action_and_releases_kl_above_warn() -> None:
     controller = make_controller(warmup_control_steps=1, kp=10, kd=0)
     warmup = controller.update(0.91)
-    assert warmup.beta_new == warmup.beta_old
+    assert warmup.beta_new > warmup.beta_old
     controller.update(0.91)
     raised = controller.beta
     released = controller.update(1.0)
     assert raised > controller.base_beta
     assert controller.beta < raised
-    assert released.released_toward_base
+    assert released.released_kl
+
+
+def test_buffer_p_releases_kl_and_falling_d_can_brake() -> None:
+    controller = make_controller(kp=0.2, ki=0.5, kd=0, safe_release_rate=0.25)
+    controller.update(0.99)
+    update = controller.update(0.94)
+    assert update.safety_state == "BUFFER"
+    assert update.p_term < 0
+    assert update.i_term == 0
+    assert update.beta_new < update.beta_old
+    predictive = make_controller(kp=0.2, ki=0, kd=2.0)
+    predictive.update(0.99)
+    brake = predictive.update(0.94)
+    assert brake.safety_state == "BUFFER"
+    assert brake.d_term > 0
+    assert brake.beta_new > brake.beta_old
+
+
+def test_integral_only_accumulates_below_warn_and_not_at_beta_max() -> None:
+    controller = make_controller(kp=0, kd=0, ki=1.0)
+    controller.update(0.94)
+    assert controller.integral_error == 0
+    controller.update(0.91)
+    assert controller.integral_error > 0
+    controller.beta = controller.config.beta_max
+    previous = controller.integral_error
+    controller.update(0.91)
+    assert controller.integral_error == previous
 
 
 def test_state_round_trip() -> None:
@@ -95,3 +123,20 @@ def test_error_uses_warning_to_hard_interval_as_one_unit() -> None:
     controller = make_controller(kp=0, ki=0, kd=0)
     update = controller.update(controller.thresholds.hard)
     assert update.error == pytest.approx(1.0)
+
+
+def test_recovery_holds_kl_floor_until_warn_is_repeatedly_verified() -> None:
+    controller = make_controller(kp=0.2, ki=0.1, kd=0, safe_release_rate=0.25)
+    controller.begin_recovery(failed_beta=0.14, hold_evaluations=2)
+    floor = controller.recovery_beta_floor
+    assert floor == pytest.approx(0.14)
+    controller.update(0.94)
+    assert controller.beta >= floor
+    assert controller.recovery_beta_floor == floor
+    controller.update(0.91)
+    assert controller.recovery_safe_streak == 0
+    controller.update(0.94)
+    assert controller.recovery_beta_floor == floor
+    controller.update(0.94)
+    assert controller.recovery_beta_floor is None
+    assert controller.update(0.94).beta_new < floor

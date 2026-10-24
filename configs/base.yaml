@@ -16,6 +16,12 @@ safety:
   rollback_enabled: true
   # Mock-only minimum; derive the real value from score resolution/confidence bounds.
   min_eval_samples: 1
+  recovery:
+    max_retries: 2
+    beta_backoff: 1.5
+    lr_backoff: 0.5
+    interval_backoff: 0.5
+    hold_evaluations: 2
 
 control:
   mode: pid_kl
@@ -27,9 +33,9 @@ control:
   pid:
     # Gains, deadband and integral bounds use the normalized warn-to-hard interval.
     # They are scale-invariant initial values, not experimentally tuned optima.
-    kp: 2.0
-    ki: 0.2
-    kd: 1.0
+    kp: 0.2
+    ki: 0.05
+    kd: 0.2
     beta_min: 0.001
     beta_max: 1.0
     max_beta_multiplier: 2.0

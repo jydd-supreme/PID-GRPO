@@ -133,6 +133,8 @@ class PIDGRPOControlLoop:
         self.control_step = 0
         self.stop_requested = False
         self.rollback_count = 0
+        self.attempt = 0
+        self.active_checkpoint_ids: list[str] = []
 
     def after_optimizer_step(
         self,
@@ -141,11 +143,12 @@ class PIDGRPOControlLoop:
         trainer_state: Mapping[str, Any],
         optimizer_state: Mapping[str, Any],
         domain_validation_score: float | None = None,
+        force_evaluate: bool = False,
     ) -> ControlEvent:
         if self.stop_requested:
             raise RuntimeError("control loop is stopped; restore or create a new trajectory")
         self.optimizer_step += 1
-        if self.optimizer_step % self.interval:
+        if not force_evaluate and self.optimizer_step % self.interval:
             return ControlEvent(
                 self.optimizer_step, False, False, None, None,
                 self.beta_adapter.beta, None, None,
@@ -167,7 +170,11 @@ class PIDGRPOControlLoop:
             self.stop_requested = True
             rollback_target = None
             if decision.rollback_required:
-                request = self.checkpoint_manager.request_rollback(decision.reason)
+                request = self.checkpoint_manager.request_rollback(
+                    decision.reason,
+                    minimum_score=self.guard.thresholds.warn,
+                    checkpoint_ids=set(self.active_checkpoint_ids),
+                )
                 rollback_target = request.target_checkpoint_id
                 self.rollback_count += 1
             return self._event(decision, None, None, rollback_target)
@@ -183,54 +190,67 @@ class PIDGRPOControlLoop:
         if decision.hard_violation:
             return self._event(decision, pid_update, None, None)
 
-        checkpoint_id = f"step-{self.optimizer_step:08d}-control-{self.control_step:05d}"
-        self.checkpoint_manager.save(
-            checkpoint_id,
-            optimizer_step=self.optimizer_step,
-            control_step=self.control_step,
-            capability_score=float(result["overall_score"]),
-            domain_validation_score=domain_validation_score,
-            safety_verified=True,
-            pid_state=self.pid.state_dict() if self.pid else {"version": 1, "mode": "disabled"},
-            safety_state=self.guard.state_dict(),
-            trainer_state=dict(trainer_state),
-            optimizer_state=dict(optimizer_state),
-            metadata={
-                "evaluation": dict(result),
-                "beta_adapter": self.beta_adapter.state_dict(),
-                "control_loop_state": self.state_dict(),
-                "evaluator_state": (
-                    self.evaluator.state_dict() if hasattr(self.evaluator, "state_dict") else None
-                ),
-            },
-            artifact_writer=self.checkpoint_artifact_writer,
+        checkpoint_id = (
+            f"attempt-{self.attempt:02d}-step-{self.optimizer_step:08d}"
+            f"-control-{self.control_step:05d}"
         )
+        self.active_checkpoint_ids.append(checkpoint_id)
+        try:
+            self.checkpoint_manager.save(
+                checkpoint_id,
+                optimizer_step=self.optimizer_step,
+                control_step=self.control_step,
+                capability_score=float(result["overall_score"]),
+                domain_validation_score=domain_validation_score,
+                safety_verified=True,
+                pid_state=self.pid.state_dict() if self.pid else {"version": 1, "mode": "disabled"},
+                safety_state=self.guard.state_dict(),
+                trainer_state=dict(trainer_state),
+                optimizer_state=dict(optimizer_state),
+                metadata={
+                    "evaluation": dict(result),
+                    "beta_adapter": self.beta_adapter.state_dict(),
+                    "control_loop_state": self.state_dict(),
+                    "evaluator_state": (
+                        self.evaluator.state_dict() if hasattr(self.evaluator, "state_dict") else None
+                    ),
+                },
+                artifact_writer=self.checkpoint_artifact_writer,
+            )
+        except BaseException:
+            self.active_checkpoint_ids.pop()
+            raise
         return self._event(decision, pid_update, checkpoint_id, None)
 
     def save_initial_checkpoint(self, capability_score: float) -> str:
         """Persist the pre-training model as the first safe rollback target."""
-        checkpoint_id = "step-00000000-control-00000"
-        self.checkpoint_manager.save(
-            checkpoint_id,
-            optimizer_step=0,
-            control_step=0,
-            capability_score=float(capability_score),
-            domain_validation_score=None,
-            safety_verified=True,
-            pid_state=self.pid.state_dict() if self.pid else {"version": 1, "mode": "disabled"},
-            safety_state=self.guard.state_dict(),
-            trainer_state={"external_hf_state": True},
-            optimizer_state={"external_hf_state": True},
-            metadata={
-                "evaluation": {"overall_score": float(capability_score), "source": "baseline"},
-                "beta_adapter": self.beta_adapter.state_dict(),
-                "control_loop_state": self.state_dict(),
-                "evaluator_state": (
-                    self.evaluator.state_dict() if hasattr(self.evaluator, "state_dict") else None
-                ),
-            },
-            artifact_writer=self.checkpoint_artifact_writer,
-        )
+        checkpoint_id = "attempt-00-step-00000000-control-00000"
+        self.active_checkpoint_ids.append(checkpoint_id)
+        try:
+            self.checkpoint_manager.save(
+                checkpoint_id,
+                optimizer_step=0,
+                control_step=0,
+                capability_score=float(capability_score),
+                domain_validation_score=None,
+                safety_verified=True,
+                pid_state=self.pid.state_dict() if self.pid else {"version": 1, "mode": "disabled"},
+                safety_state=self.guard.state_dict(),
+                trainer_state={"external_hf_state": True},
+                optimizer_state={"external_hf_state": True},
+                metadata={
+                    "evaluation": {"overall_score": float(capability_score), "source": "baseline"},
+                    "beta_adapter": self.beta_adapter.state_dict(),
+                    "control_loop_state": self.state_dict(),
+                    "evaluator_state": (
+                        self.evaluator.state_dict() if hasattr(self.evaluator, "state_dict") else None
+                    ),
+                },
+                artifact_writer=self.checkpoint_artifact_writer,
+            )
+        except BaseException:
+            self.active_checkpoint_ids.pop()
+            raise
         return checkpoint_id
 
     def restore_protocol_state(self, checkpoint_id: str) -> None:
@@ -243,6 +263,21 @@ class PIDGRPOControlLoop:
         evaluator_state = metadata.get("evaluator_state")
         if evaluator_state is not None and hasattr(self.evaluator, "load_state_dict"):
             self.evaluator.load_state_dict(evaluator_state)
+        self.stop_requested = False
+
+    def begin_recovery(
+        self, failed_beta: float, rollback_count: int, attempt: int,
+        hold_evaluations: int,
+    ) -> None:
+        """Fork from a verified checkpoint with stronger temporary KL."""
+        if self.pid is None:
+            raise RuntimeError("automatic recovery is supported only for pid_kl")
+        if attempt <= self.attempt:
+            raise ValueError("recovery attempt must advance")
+        self.attempt = attempt
+        self.rollback_count = rollback_count
+        self.pid.begin_recovery(failed_beta, hold_evaluations)
+        self.beta_adapter.set_beta(self.pid.beta)
         self.stop_requested = False
 
     def _event(
@@ -270,6 +305,8 @@ class PIDGRPOControlLoop:
             "control_step": self.control_step,
             "stop_requested": self.stop_requested,
             "rollback_count": self.rollback_count,
+            "attempt": self.attempt,
+            "active_checkpoint_ids": list(self.active_checkpoint_ids),
             "beta_adapter": self.beta_adapter.state_dict(),
         }
 
@@ -280,4 +317,6 @@ class PIDGRPOControlLoop:
         self.control_step = int(state["control_step"])
         self.stop_requested = bool(state["stop_requested"])
         self.rollback_count = int(state["rollback_count"])
+        self.attempt = int(state.get("attempt", 0))
+        self.active_checkpoint_ids = list(state.get("active_checkpoint_ids", []))
         self.beta_adapter.load_state_dict(state["beta_adapter"])
