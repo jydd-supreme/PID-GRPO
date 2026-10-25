@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
 from src.safety.hf_checkpoint import HFTrainingStateIO
@@ -25,6 +26,9 @@ class PIDControlCallback:
 
             def on_step_end(self, args, state, control, **callback_kwargs):
                 return self._impl.on_step_end(args, state, control, **callback_kwargs)
+
+            def on_log(self, args, state, control, logs=None, **callback_kwargs):
+                return self._impl.on_log(args, state, control, logs=logs, **callback_kwargs)
 
             def on_pre_optimizer_step(self, args, state, control, **callback_kwargs):
                 return self._impl.on_pre_optimizer_step(args, state, control, **callback_kwargs)
@@ -59,6 +63,15 @@ class _PIDControlCallbackImpl:
         self.last_global_step = 0
         self.lr_multiplier = 1.0
         self.effective_learning_rate: float | None = None
+
+    def on_log(self, args: Any, state: Any, control: Any, logs: Any = None, **_: Any) -> Any:
+        if self.metrics is not None and logs:
+            path = self.metrics.path.with_name("grpo.jsonl")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"optimizer_step": int(state.global_step),
+                                         "beta_for_next_update": self.loop.beta_adapter.beta,
+                                         "metrics": logs}) + "\n")
+        return control
 
     def configure_recovery(self, *, lr_multiplier: float, interval: int) -> None:
         if not 0.0 < lr_multiplier <= 1.0 or interval < 1:

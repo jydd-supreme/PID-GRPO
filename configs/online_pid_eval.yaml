@@ -1,0 +1,17 @@
+extends: real_pid_kl.yaml
+
+# Opt-in evaluation backend. Training/reward/PID formula remain unchanged.
+project:
+  name: pid-grpo-online-eval
+  output_dir: /root/autodl-tmp/GRPO/outputs/online-pid-eval
+training:
+  enabled: false
+safety:
+  min_eval_samples: 1000
+evaluation:
+  backend: online_suite
+  suite_config: configs/online_benchmarks.yaml
+  manifest_file: benchmark_manifests/online_v1.json
+  max_new_tokens: 2048
+  max_context_length: 4096
+  # Frozen final roles are evaluated explicitly after tuning, via the CLI.

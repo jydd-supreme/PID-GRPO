@@ -80,10 +80,27 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("GRPO num_generations must be at least 2")
     if int(training["per_device_train_batch_size"]) % generations:
         raise ValueError("single-GPU batch size must be divisible by num_generations")
-    for name in ("train_file", "control_file", "domain_validation_file", "final_test_file"):
+    data_backend = config["data"].get("backend", "local_jsonl")
+    evaluation = config["evaluation"]
+    eval_backend = evaluation.get("backend", "local_exact_match")
+    if data_backend not in {"local_jsonl", "online_suite"} or eval_backend not in {"local_exact_match", "online_suite"}:
+        raise ValueError("unsupported data/evaluation backend")
+    if training.get("reward_backend", "numeric_exact_match") not in {"numeric_exact_match", "math_verify"}:
+        raise ValueError("unsupported training reward_backend")
+    if data_backend == "online_suite":
+        if eval_backend != "online_suite" or training.get("reward_backend") != "math_verify":
+            raise ValueError("online DeepMath requires online evaluation and math_verify reward")
+    required_paths = [] if data_backend == "online_suite" else ["train_file"]
+    if eval_backend == "local_exact_match":
+        required_paths.extend(["control_file", "domain_validation_file", "final_test_file"])
+    for name in required_paths:
         if not config["data"].get(name):
             raise ValueError(f"missing data path: {name}")
-    evaluation = config["evaluation"]
+    if eval_backend == "online_suite":
+        if not evaluation.get("suite_config") or not evaluation.get("manifest_file"):
+            raise ValueError("online evaluation requires suite_config and manifest_file")
+        if int(evaluation.get("max_context_length", 0)) <= int(evaluation["max_new_tokens"]):
+            raise ValueError("evaluation context must exceed generation budget")
     if int(evaluation["batch_size"]) < 1 or int(evaluation["max_new_tokens"]) < 1:
         raise ValueError("evaluation sizes must be positive")
     storage = config["storage"]

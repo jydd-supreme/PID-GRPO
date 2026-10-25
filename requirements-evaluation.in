@@ -1,0 +1,4 @@
+# Optional benchmark scorers. Keep the existing CUDA/TRL training lock unchanged.
+# Resolve these in a separate server environment first; this is NOT a hash lock.
+math-verify[antlr4_11_0]==0.7.0
+lm-eval[ifeval]==0.4.8

@@ -1,0 +1,55 @@
+extends: real_pid_kl.yaml
+
+# Review candidate for Qwen2.5-0.5B-Instruct, not a benchmark-tuned optimum.
+# Algorithm/reward/evaluator changes require approval; see the audit report.
+project:
+  name: pid-grpo-pilot
+  output_dir: /root/autodl-tmp/GRPO/outputs/pilot-pid-kl
+
+safety:
+  # Preserve the 5% RELATIVE degradation budget; start intervention earlier.
+  safe_ratio: 0.40
+  warn_ratio: 0.60
+  # Resolution floor only, NOT a statistical power or confidence guarantee.
+  min_eval_samples: 4096
+
+control:
+  eval_interval_optimizer_steps: 10
+  beta: 0.04
+  fixed_beta: 0.04
+  pid:
+    # Per evaluation gains. Recalibrate jointly with interval and batch size.
+    kp: 0.15
+    ki: 0.02
+    kd: 0.10
+    beta_min: 0.01
+    beta_max: 0.30
+    max_beta_multiplier: 1.5
+    ema_alpha: 0.60
+    derivative_alpha: 0.30
+    deadband: 0.10
+    integral_min: 0.0
+    integral_max: 2.0
+    safe_integral_leak: 0.80
+    safe_release_rate: 0.05
+    warmup_control_steps: 1
+
+training:
+  # Remains off pending data/verifier review and runtime verification.
+  enabled: false
+  max_steps: 200
+  per_device_train_batch_size: 8
+  num_generations: 8
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-6
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  max_prompt_length: 512
+  max_completion_length: 1024
+  # Pinned TRL computes unscaled log-probs in its loss.
+  temperature: 1.0
+
+evaluation:
+  batch_size: 4
+  max_new_tokens: 1024

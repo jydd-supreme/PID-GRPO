@@ -40,8 +40,8 @@ runs/
 logs/
 
 # Large datasets
-data/
-datasets/
+/data/
+/datasets/
 
 # Cache
 .cache/

@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from src.controllers.pid_controller import PIDConfig, PIDController
-from src.data.dataset_builder import load_local_jsonl
+from src.data.experiment_data import load_experiment_data
 from src.evaluation.capability_evaluator import RealCapabilityEvaluator
 from src.rewards.math_reward import compute_reward
+from src.rewards.verified_math_reward import select_reward
 from src.safety.checkpoint_manager import CheckpointManager
 from src.safety.hf_checkpoint import HFTrainingStateIO
 from src.safety.safety_guard import SafetyGuard
@@ -73,21 +74,6 @@ def math_accuracy_reward(completions: list[Any], answer: list[Any], **_: Any) ->
     ]
 
 
-def _load_and_check_splits(data_config: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    names = ("train_file", "control_file", "domain_validation_file", "final_test_file")
-    splits = {name: load_local_jsonl(data_config[name]) for name in names}
-    seen: dict[str, str] = {}
-    for split_name, rows in splits.items():
-        for row in rows:
-            sample_id = str(row["id"])
-            if sample_id in seen:
-                raise ValueError(
-                    f"dataset leakage: id {sample_id!r} occurs in {seen[sample_id]} and {split_name}"
-                )
-            seen[sample_id] = split_name
-    return splits
-
-
 def _record_metadata(record: Any, beta: float) -> dict[str, Any]:
     return {
         "checkpoint_id": record.checkpoint_id,
@@ -115,7 +101,18 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
     safety = config["safety"]
     evaluation = config["evaluation"]
     set_seed(int(project["seed"]))
-    splits = _load_and_check_splits(config["data"])
+    online_suite = evaluation.get("backend") == "online_suite"
+    reward_func = select_reward(training.get("reward_backend", "numeric_exact_match"), math_accuracy_reward)
+    prepared_data = load_experiment_data(config)
+    splits = prepared_data.splits
+    manifest = prepared_data.manifest
+    output_dir = Path(project["output_dir"])
+    if (output_dir / "checkpoints" / "manifest.json").exists():
+        raise RuntimeError("output directory already contains a run; choose a new output_dir")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "run_config.json").write_text(json.dumps(dict(config), indent=2), encoding="utf-8")
+    if manifest is not None:
+        (output_dir / "data_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     model_name = str(training["model_name"])
     tokenizer = AutoTokenizer.from_pretrained(
@@ -130,7 +127,6 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
 
     mode = KLMode(control["mode"])
     beta = float(control["beta"])
-    output_dir = Path(project["output_dir"])
     run_output = output_dir / "trainer"
     args = GRPOConfig(
         output_dir=str(run_output),
@@ -176,18 +172,31 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         )
     trainer = GRPOTrainer(
         model=model_name,
-        reward_funcs=math_accuracy_reward,
+        reward_funcs=reward_func,
         args=args,
         train_dataset=Dataset.from_list(splits["train_file"]),
         processing_class=tokenizer,
         peft_config=peft_config,
     )
 
-    evaluator = RealCapabilityEvaluator(
-        tokenizer,
-        batch_size=int(evaluation["batch_size"]),
-        max_new_tokens=int(evaluation["max_new_tokens"]),
-    )
+    if online_suite:
+        from src.evaluation.benchmark_evaluator import HFBenchmarkScorer, OnlineBenchmarkEvaluator
+
+        scorer = HFBenchmarkScorer(
+            tokenizer, max_new_tokens=int(evaluation["max_new_tokens"]),
+            max_context_length=int(evaluation["max_context_length"]),
+        )
+        scorer.prepare(splits["control_file"] + splits["domain_validation_file"])
+        evaluator = OnlineBenchmarkEvaluator(
+            scorer, history_path=output_dir / "metrics" / "benchmarks.jsonl",
+            step_provider=lambda: int(trainer.state.global_step),
+        )
+    else:
+        evaluator = RealCapabilityEvaluator(
+            tokenizer,
+            batch_size=int(evaluation["batch_size"]),
+            max_new_tokens=int(evaluation["max_new_tokens"]),
+        )
     control_dataset = splits["control_file"]
     baseline = evaluator.evaluate(trainer.model, control_dataset)
     if (
@@ -196,6 +205,7 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         or float(baseline["overall_score"]) <= 0
     ):
         raise RuntimeError(f"invalid initial control baseline: {baseline}")
+    (output_dir / "baseline.json").write_text(json.dumps(baseline, indent=2), encoding="utf-8")
     thresholds = SafetyThresholds.from_baseline(
         float(baseline["overall_score"]),
         ThresholdConfig(
@@ -339,7 +349,10 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
     tokenizer.save_pretrained(str(last_dir))
     state_io.restore(best.path)
     loop.restore_protocol_state(best.checkpoint_id)
-    final_result = evaluator.evaluate(trainer.model, splits["final_test_file"])
+    if online_suite:
+        final_result = {"status": "not_evaluated", "reason": "run online_benchmarks.py evaluate --allow-final after tuning is frozen"}
+    else:
+        final_result = evaluator.evaluate(trainer.model, splits["final_test_file"])
     best_dir = output_dir / "best_model"
     trainer.save_model(str(best_dir))
     tokenizer.save_pretrained(str(best_dir))
@@ -352,6 +365,9 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         "best_model_path": str(best_dir),
         "last_model_path": str(last_dir),
     }
+    if online_suite:
+        summary["evaluation_suite_sha256"] = manifest["suite_sha256"]
+        summary["evaluation_protocol"] = manifest["protocol"]
     metadata_path = output_dir / "model_selection.json"
     temporary_path = metadata_path.with_suffix(".json.tmp")
     temporary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")

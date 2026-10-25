@@ -1,0 +1,7 @@
+extends: deepmath_common.yaml
+project:
+  output_dir: /root/autodl-tmp/GRPO/outputs/deepmath-qwen15b/fixed
+control:
+  mode: fixed_kl
+  beta: 0.04
+  fixed_beta: 0.04

@@ -1,0 +1,67 @@
+# Dataset revisions are immutable. Streaming keeps selected rows in RAM only.
+version: 1
+seed: 42
+protocol: pid-grpo-zero-shot-v1
+aggregation: sample_weighted
+sources:
+  deepmath:
+    path: zwhe99/DeepMath-103K
+    name: default
+    revision: 5cf055d1fe3d7a2eb19719ac020211469736ae44
+    split: train
+    kind: math
+    selection: buffered
+    buffer_size: 1024
+    columns: [question, final_answer, difficulty, topic]
+    allocations: {train: 20000, domain_validation: 512}
+  mmlu:
+    path: cais/mmlu
+    name: all
+    revision: c30699e8356da336a370243923dbaf21066bb9fe
+    split: test
+    kind: mmlu
+    selection: stratified
+    allocations: {control: 500, forgetting: 500}
+  arc_challenge:
+    path: allenai/ai2_arc
+    name: ARC-Challenge
+    revision: 210d026faf9955653af8916fad021475a3f00453
+    split: test
+    kind: arc
+    selection: reservoir
+    allocations: {control: 250, forgetting: 250}
+  hellaswag:
+    path: Rowan/hellaswag
+    name: default
+    revision: 218ec52e09a7e7462a5400043bb9a69a41d06b76
+    split: validation
+    kind: hellaswag
+    selection: reservoir
+    allocations: {control: 250, forgetting: 250}
+  math500:
+    path: HuggingFaceH4/MATH-500
+    name: default
+    revision: 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be
+    split: test
+    kind: math
+    selection: reservoir
+    allocations: {final_math: null}
+    expected_rows: 500
+  gsm8k:
+    path: openai/gsm8k
+    name: main
+    revision: 740312add88f781978c0658806c59bc2815b9866
+    split: test
+    kind: math
+    selection: reservoir
+    allocations: {final_math: null}
+    expected_rows: 1319
+  ifeval:
+    path: google/IFEval
+    name: default
+    revision: 966cd89545d6b6acfd7638bc708b98261ca58e84
+    split: train
+    kind: ifeval
+    selection: reservoir
+    allocations: {instruction: null}
+    expected_rows: 541

@@ -32,6 +32,13 @@ python3 scripts/verify_environment.py
 
 ## 数据准备
 
+按需读取 MMLU、ARC-Challenge、HellaSwag、MATH-500、GSM8K 和 IFEval 的
+新评测入口见 [在线评测说明](docs/online_evaluation.md)。它使用固定版本与样本 manifest，
+无需预下载完整评测数据，且可通过 `configs/online_pid_eval.yaml` 显式接入 PID 反馈。
+已按批准范围新增 DeepMath 的 Math-Verify 奖励。完整的
+`DeepMath → Qwen2.5-1.5B → 每 100 次更新评测 → PID 调节 beta` 实验入口和
+三组对照配置见 [服务器实验流程](docs/experiment_workflow.md)。
+
 真实配置需要四个互斥 JSONL 文件：
 
 ```text

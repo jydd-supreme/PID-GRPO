@@ -14,7 +14,8 @@ def configure_runtime_storage(config: Mapping[str, Any]) -> dict[str, str]:
     root = Path(storage["root_dir"]).expanduser().resolve()
     cache = Path(storage["cache_dir"]).expanduser().resolve()
     output = Path(config["project"]["output_dir"]).expanduser().resolve()
-    data_paths = [Path(value).expanduser().resolve() for value in config["data"].values()]
+    data_paths = [Path(value).expanduser().resolve() for name, value in config["data"].items()
+                  if name.endswith("_file")]
     for name, path in [("cache_dir", cache), ("output_dir", output)]:
         if not path.is_relative_to(root):
             raise ValueError(f"{name} must be inside data-disk root {root}: {path}")

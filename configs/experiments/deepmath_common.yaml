@@ -1,0 +1,36 @@
+extends: ../pilot_pid_kl.yaml
+
+# Shared experimental factors; only mode/beta/output vary between comparisons.
+project:
+  name: deepmath-qwen15b
+  output_dir: /root/autodl-tmp/GRPO/outputs/deepmath-qwen15b/common
+data:
+  backend: online_suite
+training:
+  enabled: true
+  model_name: Qwen/Qwen2.5-1.5B-Instruct
+  model_revision: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  reward_backend: math_verify
+  max_steps: 2000
+  max_prompt_length: 1024
+  max_completion_length: 2048
+  per_device_train_batch_size: 4
+  num_generations: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-6
+  lora_dropout: 0.0
+  temperature: 1.0
+control:
+  eval_interval_optimizer_steps: 100
+safety:
+  min_eval_samples: 1000
+  recovery:
+    # Main comparison stops at the same safety criterion. Recovery changes LR/K
+    # and is therefore a separate system ablation, not part of this comparison.
+    max_retries: 0
+evaluation:
+  backend: online_suite
+  suite_config: configs/online_benchmarks.yaml
+  manifest_file: benchmark_manifests/deepmath_v1.json
+  max_new_tokens: 2048
+  max_context_length: 8192

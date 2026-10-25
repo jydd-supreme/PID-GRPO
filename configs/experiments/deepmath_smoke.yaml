@@ -1,0 +1,6 @@
+extends: deepmath_pid.yaml
+project:
+  output_dir: /root/autodl-tmp/GRPO/outputs/deepmath-qwen15b/smoke
+training:
+  # Keep the real protocol: a 100-update pilot includes one control boundary.
+  max_steps: 100
