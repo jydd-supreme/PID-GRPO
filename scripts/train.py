@@ -18,6 +18,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/pid_kl.yaml")
     parser.add_argument("--enable-real-training", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--session-max-seconds", type=float)
     args = parser.parse_args()
     config = load_config(args.config)
     if not args.enable_real_training or not config["training"]["enabled"]:
@@ -28,7 +30,8 @@ def main() -> None:
     configure_runtime_storage(config)
     from src.trainers.real_grpo import run_real_training
 
-    print(json.dumps(run_real_training(config), indent=2, sort_keys=True))
+    print(json.dumps(run_real_training(config, resume=args.resume,
+                                       session_max_seconds=args.session_max_seconds), indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

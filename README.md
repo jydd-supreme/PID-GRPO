@@ -38,6 +38,8 @@ python3 scripts/verify_environment.py
 已按批准范围新增 DeepMath 的 Math-Verify 奖励。完整的
 `DeepMath → Qwen2.5-1.5B → 每 100 次更新评测 → PID 调节 beta` 实验入口和
 三组对照配置见 [服务器实验流程](docs/experiment_workflow.md)。
+服务器定时关机时使用 [跨会话断点续训](docs/restart_training.md)：默认每 25 次更新或
+600 秒保存、每次评测前后保存，主实验约三小时主动暂停，重启后加 `--resume` 继续。
 
 真实配置需要四个互斥 JSONL 文件：
 

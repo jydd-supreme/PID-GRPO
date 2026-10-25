@@ -34,3 +34,10 @@ evaluation:
   manifest_file: benchmark_manifests/deepmath_v1.json
   max_new_tokens: 2048
   max_context_length: 8192
+
+checkpointing:
+  interval_optimizer_steps: 25
+  interval_seconds: 600
+  keep_last: 3
+  # Leave an hour for saving/setup/platform shutdown within a 4-hour allocation.
+  session_max_seconds: 10800

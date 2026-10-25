@@ -8,6 +8,7 @@
 本地提交新代码、配置、测试、文档，以及 `.gitignore` 修复后可见的 `src/data/`。
 服务器 `git pull` 后执行以下命令；不需要本地下载完整数据或模型。
 主入口为 `scripts/run_experiment.py`，仅显式 train 且传入开关时启动训练。
+服务器四小时关机的保存、暂停与 `--resume` 命令见 [断点续训说明](restart_training.md)。
 
 模型固定为 Qwen2.5-1.5B-Instruct，revision 为 `989aa7980e4cf806f80c7fef2b1adb7bc71aa306`。
 数据源身份已通过官方 HF API 核对；尚未读取这七个任务的数据内容生成正式 manifest。

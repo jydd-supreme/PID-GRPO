@@ -16,6 +16,7 @@ from src.controllers.pid_controller import PIDController, PIDUpdate
 from src.evaluation.capability_evaluator import CapabilityEvaluator
 from src.safety.checkpoint_manager import CheckpointManager
 from src.safety.safety_guard import GuardDecision, SafetyGuard
+from src.utils.run_session import SessionPaused
 
 
 class KLMode(str, Enum):
@@ -155,6 +156,11 @@ class PIDGRPOControlLoop:
             )
         try:
             result = self.evaluator.evaluate(model, self.control_dataset)
+        except SessionPaused:
+            # The callback's pending-update snapshot replays this evaluation,
+            # so do not treat a scheduled shutdown as an invalid benchmark.
+            self.optimizer_step -= 1
+            raise
         except Exception as exc:
             result = {
                 "overall_score": None,
@@ -306,6 +312,7 @@ class PIDGRPOControlLoop:
             "stop_requested": self.stop_requested,
             "rollback_count": self.rollback_count,
             "attempt": self.attempt,
+            "interval": self.interval,
             "active_checkpoint_ids": list(self.active_checkpoint_ids),
             "beta_adapter": self.beta_adapter.state_dict(),
         }
@@ -318,5 +325,6 @@ class PIDGRPOControlLoop:
         self.stop_requested = bool(state["stop_requested"])
         self.rollback_count = int(state["rollback_count"])
         self.attempt = int(state.get("attempt", 0))
+        self.interval = int(state.get("interval", self.interval))
         self.active_checkpoint_ids = list(state.get("active_checkpoint_ids", []))
         self.beta_adapter.load_state_dict(state["beta_adapter"])

@@ -67,7 +67,7 @@ def test_hf_checkpoint_restores_model_optimizer_scheduler_and_state(tmp_path: Pa
 
         def save_model(self, path):
             target = Path(path)
-            target.mkdir(parents=True)
+            target.mkdir(parents=True, exist_ok=True)
             torch.save(self.model.state_dict(), target / "pytorch_model.bin")
 
         def _load_from_checkpoint(self, path):

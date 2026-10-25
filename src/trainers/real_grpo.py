@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib.metadata import version
+import fcntl
 import json
 import math
 from pathlib import Path
@@ -25,6 +26,9 @@ from src.trainers.pid_grpo_trainer import (
 )
 from src.utils.seed import set_seed
 from src.utils.storage import configure_runtime_storage
+from src.utils.run_session import (RunSession, RestartCheckpointStore, SessionPaused,
+                                   TrainingBudgetComplete, atomic_json, restore_control_state)
+from src.evaluation.online_data import digest
 
 
 PINNED_VERSIONS = {
@@ -85,7 +89,47 @@ def _record_metadata(record: Any, beta: float) -> dict[str, Any]:
     }
 
 
-def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
+def run_real_training(config: Mapping[str, Any], *, resume: bool = False,
+                      session_max_seconds: float | None = None) -> dict[str, Any]:
+    configure_runtime_storage(config)
+    output_dir = Path(config["project"]["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    settings = config.get("checkpointing", {})
+    limit = settings.get("session_max_seconds", 0) if session_max_seconds is None else session_max_seconds
+    session = RunSession(output_dir, max_seconds=float(limit))
+    with (output_dir / ".run.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another training process owns this output directory") from exc
+        session.install_handlers()
+        try:
+            session.event("resume_requested" if resume else "start_requested")
+            result = _run_real_training(config, resume=resume, session=session)
+            session.event(result["status"], global_step=result.get("global_step"))
+            atomic_json(output_dir / "run_result.json", result)
+            if result["status"] == "complete":
+                atomic_json(output_dir / "progress.json", {"status": "complete", "session_id": session.session_id,
+                                                           "global_step": result.get("global_step", config["training"]["max_steps"])})
+            return result
+        except SessionPaused as exc:
+            latest = RestartCheckpointStore(output_dir / "restart_checkpoints").latest()
+            result = {"status": "paused", "reason": str(exc), "session_id": session.session_id,
+                      "global_step": latest[1]["global_step"] if latest else 0,
+                      "checkpoint": str(latest[0]) if latest else None,
+                      "pending_evaluation": latest[1]["pending_optimizer_step"] is not None if latest else False}
+            atomic_json(output_dir / "run_result.json", result)
+            atomic_json(output_dir / "progress.json", result)
+            session.event("paused", **{key: value for key, value in result.items() if key not in {"status", "session_id"}})
+            return result
+        except Exception as exc:
+            session.event("error", error_type=type(exc).__name__, error=str(exc))
+            raise
+        finally:
+            session.close()
+
+
+def _run_real_training(config: Mapping[str, Any], *, resume: bool, session: RunSession) -> dict[str, Any]:
     """Run one safe single-GPU trajectory and return its terminal summary."""
     storage_paths = configure_runtime_storage(config)
     verify_training_environment()
@@ -107,12 +151,39 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
     splits = prepared_data.splits
     manifest = prepared_data.manifest
     output_dir = Path(project["output_dir"])
-    if (output_dir / "checkpoints" / "manifest.json").exists():
-        raise RuntimeError("output directory already contains a run; choose a new output_dir")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "run_config.json").write_text(json.dumps(dict(config), indent=2), encoding="utf-8")
+    run_config_path = output_dir / "run_config.json"
+    if resume:
+        if not run_config_path.is_file() or json.loads(run_config_path.read_text(encoding="utf-8")) != dict(config):
+            raise ValueError("resume requires the identical saved run configuration, including seed and max_steps")
+        result_path = output_dir / "run_result.json"
+        if result_path.is_file():
+            previous_result = json.loads(result_path.read_text(encoding="utf-8"))
+            if previous_result.get("status") == "complete":
+                return previous_result
+            if previous_result.get("status") == "stopped_hard":
+                raise RuntimeError("this run stopped for safety; --resume cannot bypass Hard/Invalid")
+    else:
+        if run_config_path.exists() or (output_dir / "checkpoints" / "manifest.json").exists():
+            raise RuntimeError("output directory already contains a run; pass --resume to continue it")
+        atomic_json(run_config_path, dict(config))
+    data_signature = digest(manifest if manifest is not None else splits)
+    if resume and (output_dir / "data_identity.json").is_file():
+        if json.loads((output_dir / "data_identity.json").read_text())["sha256"] != data_signature:
+            raise ValueError("training/evaluation data changed since the original run")
+    atomic_json(output_dir / "data_identity.json", {"sha256": data_signature})
+    restart_identity = {"run_signature": digest(config), "data_signature": data_signature}
+    settings = config.get("checkpointing", {})
+    restart_store = RestartCheckpointStore(output_dir / "restart_checkpoints",
+                                            keep_last=int(settings.get("keep_last", 3)))
+    if resume:
+        discarded = restart_store.discard_incomplete()
+        if discarded:
+            session.event("discarded_incomplete_snapshots", count=discarded)
+    restart = restart_store.latest() if resume else None
+    if restart and any(restart[1].get(key) != value for key, value in restart_identity.items()):
+        raise ValueError("restart checkpoint identity does not match this run/data")
     if manifest is not None:
-        (output_dir / "data_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        atomic_json(output_dir / "data_manifest.json", manifest)
 
     model_name = str(training["model_name"])
     tokenizer = AutoTokenizer.from_pretrained(
@@ -170,7 +241,13 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
             lora_dropout=float(training["lora_dropout"]),
             target_modules=list(training["lora_target_modules"]),
         )
-    trainer = GRPOTrainer(
+    from src.data.resumable_sampler import ResumableRepeatSampler
+
+    class RestartableGRPOTrainer(GRPOTrainer):
+        def _get_train_sampler(self):
+            return ResumableRepeatSampler(self.train_dataset, self.num_generations, self.args.seed)
+
+    trainer = RestartableGRPOTrainer(
         model=model_name,
         reward_funcs=reward_func,
         args=args,
@@ -190,6 +267,9 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         evaluator = OnlineBenchmarkEvaluator(
             scorer, history_path=output_dir / "metrics" / "benchmarks.jsonl",
             step_provider=lambda: int(trainer.state.global_step),
+            progress_dir=output_dir / "evaluation_progress",
+            progress_identity=restart_identity,
+            session=session,
         )
     else:
         evaluator = RealCapabilityEvaluator(
@@ -198,14 +278,16 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
             max_new_tokens=int(evaluation["max_new_tokens"]),
         )
     control_dataset = splits["control_file"]
-    baseline = evaluator.evaluate(trainer.model, control_dataset)
+    baseline_path = output_dir / "baseline.json"
+    baseline = (json.loads(baseline_path.read_text(encoding="utf-8"))
+                if resume and baseline_path.is_file() else evaluator.evaluate(trainer.model, control_dataset))
     if (
         baseline.get("valid") is not True
         or int(baseline.get("num_samples", 0)) < int(safety["min_eval_samples"])
         or float(baseline["overall_score"]) <= 0
     ):
         raise RuntimeError(f"invalid initial control baseline: {baseline}")
-    (output_dir / "baseline.json").write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+    atomic_json(baseline_path, baseline)
     thresholds = SafetyThresholds.from_baseline(
         float(baseline["overall_score"]),
         ThresholdConfig(
@@ -227,11 +309,12 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         else None
     )
     manager = CheckpointManager(output_dir / "checkpoints")
-    if manager.records:
-        raise RuntimeError(
-            "checkpoint directory already contains a run; choose a new output_dir "
-            "or implement an explicit reviewed resume"
-        )
+    if resume:
+        manager.recover_interrupted_writes()
+    if manager.records and not restart:
+        raise RuntimeError("no intact restart checkpoint; do not restart this trajectory from the base model")
+    if manager.rollback_request is not None:
+        raise RuntimeError("pending safety rollback must be resolved; --resume cannot bypass it")
     loop = PIDGRPOControlLoop(
         evaluator=evaluator,
         control_dataset=control_dataset,
@@ -251,18 +334,34 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
         domain_evaluator=evaluator,
         domain_dataset=splits["domain_validation_file"],
         metrics_path=output_dir / "metrics" / "training.csv",
+        restart_store=restart_store,
+        session=session,
+        restart_identity=restart_identity,
+        checkpoint_steps=int(settings.get("interval_optimizer_steps", 25)),
+        checkpoint_seconds=float(settings.get("interval_seconds", 600)),
     )
     trainer.add_callback(callback)
     recovery = safety["recovery"]
     initial_interval = loop.interval
-    attempts = 0
     resume_path: Path | None = None
+    if restart:
+        directory, restored = restart
+        restore_control_state(loop, restored)
+        resume_path = state_io.resume_path(directory)
+        callback.load_restart_state(restored, rng_path=resume_path)
+        session.event("restored", global_step=restored["global_step"],
+                       checkpoint=str(directory), skipped_corrupt=restart_store.skipped,
+                       pending_evaluation=restored["pending_optimizer_step"] is not None)
+    attempts = loop.attempt
     max_steps = int(training["max_steps"])
     while True:
-        if resume_path is None:
-            trainer.train()
-        else:
-            trainer.train(resume_from_checkpoint=str(resume_path))
+        try:
+            if resume_path is None:
+                trainer.train()
+            else:
+                trainer.train(resume_from_checkpoint=str(resume_path))
+        except TrainingBudgetComplete:
+            pass
         rollback = manager.rollback_request
         if rollback is None:
             if loop.stop_requested:
@@ -358,6 +457,7 @@ def run_real_training(config: Mapping[str, Any]) -> dict[str, Any]:
     tokenizer.save_pretrained(str(best_dir))
     summary = {
         "status": "complete",
+        "global_step": max_steps,
         "attempts": attempts,
         "best_feasible": _record_metadata(best, loop.beta_adapter.beta),
         "last_step": _record_metadata(last, last_beta),

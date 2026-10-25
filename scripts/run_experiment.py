@@ -23,6 +23,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--root-dir", help="server data disk; remaps cache/data/output paths together")
     parser.add_argument("--enable-real-training", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="continue the same mode/seed/output after restart")
+    parser.add_argument("--session-max-seconds", type=float, help="session budget; 0 disables planned pausing")
     args = parser.parse_args()
     config = runtime_config(load_config(args.config), seed=args.seed, root_dir=args.root_dir)
     validate_config(config)
@@ -59,9 +61,7 @@ def main() -> None:
         print(json.dumps({"status": "ready_for_smoke", "plan": plan}, indent=2))
         return
     from src.trainers.real_grpo import run_real_training
-    result = run_real_training(config)
-    (Path(config["project"]["output_dir"]) / "run_result.json").write_text(
-        json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    result = run_real_training(config, resume=args.resume, session_max_seconds=args.session_max_seconds)
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

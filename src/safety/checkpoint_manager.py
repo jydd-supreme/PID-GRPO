@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import uuid
 from typing import Any, Callable, Mapping, Protocol
 
 
@@ -119,9 +120,15 @@ class CheckpointManager:
         if directory.exists() or temporary.exists():
             raise FileExistsError(f"checkpoint already exists: {checkpoint_id}")
         temporary.mkdir(parents=False, exist_ok=False)
+        record = CheckpointRecord(
+            checkpoint_id=checkpoint_id, optimizer_step=optimizer_step, control_step=control_step,
+            capability_score=capability_score, domain_validation_score=domain_validation_score,
+            safety_verified=safety_verified, path=str(directory), created_at_utc=self._now(),
+        )
         payload = {
             "schema_version": 1,
             "checkpoint_id": checkpoint_id,
+            "checkpoint_record": asdict(record),
             "pid_state": dict(pid_state),
             "safety_state": dict(safety_state),
             "trainer_state": dict(trainer_state),
@@ -136,19 +143,36 @@ class CheckpointManager:
         except BaseException:
             shutil.rmtree(temporary, ignore_errors=True)
             raise
-        record = CheckpointRecord(
-            checkpoint_id=checkpoint_id,
-            optimizer_step=optimizer_step,
-            control_step=control_step,
-            capability_score=capability_score,
-            domain_validation_score=domain_validation_score,
-            safety_verified=safety_verified,
-            path=str(directory),
-            created_at_utc=self._now(),
-        )
         self.records.append(record)
         self._write_manifest()
         return record
+
+    def recover_interrupted_writes(self) -> None:
+        """Call under the run's exclusive lock after a process restart."""
+        known = {record.checkpoint_id for record in self.records}
+        changed = False
+        for directory in self.root.iterdir():
+            if not directory.is_dir():
+                continue
+            if directory.name.startswith("."):
+                if directory.name.endswith(".tmp"):
+                    # Do not mistake a half-written checkpoint for a safe point.
+                    directory.rename(self.root / (".abandoned-" + uuid.uuid4().hex))
+                continue
+            if directory.name in known:
+                continue
+            payload = json.loads((directory / self.STATE).read_text(encoding="utf-8"))
+            raw_record = payload.get("checkpoint_record")
+            if raw_record is None:
+                raise RuntimeError("unindexed legacy checkpoint requires manual inspection")
+            record = CheckpointRecord(**raw_record)
+            if record.checkpoint_id != directory.name or Path(record.path).resolve() != directory.resolve():
+                raise ValueError("published checkpoint identity mismatch")
+            self.records.append(record)
+            known.add(record.checkpoint_id)
+            changed = True
+        if changed:
+            self._write_manifest()
 
     def read_payload(self, checkpoint_id: str) -> dict[str, Any]:
         record = next((item for item in self.records if item.checkpoint_id == checkpoint_id), None)

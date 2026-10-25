@@ -57,7 +57,8 @@ raw 先进入 guard，PID 只处理有效且未达到 Hard 的反馈。
 不改变 LR/K 后继续；早停必须报告失败和未完成预算，不能冒充同预算终态。
 旧配置的回滚续训保留。如研究恢复系统，应另立消融并记录重算成本。
 安全 checkpoint 保存模型/LoRA、optimizer、scheduler、TrainerState、RNG、PID 和控制状态。
-当前只支持单 GPU；外部进程崩溃恢复和分布式训练未作为已验证能力。
+跨进程恢复由独立 restart checkpoint 和 session journal 负责，支持评测中断后继续；
+细节与验证边界见 [断点续训说明](restart_training.md)。当前仍只支持单 GPU。
 
 ## 运行产物
 

@@ -108,3 +108,9 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("storage root_dir and cache_dir are required")
     if float(storage["min_free_gb"]) < 0:
         raise ValueError("storage.min_free_gb must be non-negative")
+    if "checkpointing" in config:
+        checkpointing = config["checkpointing"]
+        if int(checkpointing["interval_optimizer_steps"]) < 1 or float(checkpointing["interval_seconds"]) <= 0:
+            raise ValueError("restart checkpoint intervals must be positive")
+        if int(checkpointing["keep_last"]) < 2 or float(checkpointing["session_max_seconds"]) < 0:
+            raise ValueError("invalid restart checkpoint retention/session limit")

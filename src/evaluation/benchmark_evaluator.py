@@ -105,10 +105,14 @@ class OnlineBenchmarkEvaluator(CapabilityEvaluator):
     """Evaluate the SAME fixed in-memory samples at every control update."""
 
     def __init__(self, scorer: Any, *, history_path: str | Path | None = None,
-                 step_provider: Any = None) -> None:
+                 step_provider: Any = None, progress_dir: str | Path | None = None,
+                 progress_identity: Any = None, session: Any = None) -> None:
         self.scorer = scorer
         self.history_path = Path(history_path) if history_path else None
         self.step_provider = step_provider
+        self.progress_dir = Path(progress_dir) if progress_dir else None
+        self.progress_identity = progress_identity
+        self.session = session
 
     def evaluate(self, model: Any, dataset: Any) -> dict[str, Any]:
         import torch
@@ -119,13 +123,27 @@ class OnlineBenchmarkEvaluator(CapabilityEvaluator):
         if len({row["id"] for row in rows}) != len(rows):
             raise ValueError("duplicate benchmark sample")
         self.scorer.prepare(rows)
+        if self.session:
+            self.session.check()
+        progress = None
+        if self.progress_dir:
+            from src.evaluation.progress import EvaluationProgress
+            progress = EvaluationProgress(self.progress_dir, model, rows, self.progress_identity)
         was_training = model.training
         by_task: dict[str, list[dict[str, Any]]] = defaultdict(list)
         model.eval()
         try:
             with torch.inference_mode():
                 for row in rows:
-                    scored = self.scorer.score(model, row)
+                    if self.session:
+                        self.session.check()
+                    scored = progress.results.get(row["id"]) if progress else None
+                    if scored is None:
+                        scored = self.scorer.score(model, row)
+                        if not math.isfinite(float(scored["score"])) or not 0 <= scored["score"] <= 1:
+                            raise ValueError("invalid benchmark score")
+                        if progress:
+                            progress.append(row["id"], scored)
                     if not math.isfinite(float(scored["score"])) or not 0 <= scored["score"] <= 1:
                         raise ValueError("invalid benchmark score")
                     by_task[row["task"]].append(scored)
@@ -152,5 +170,6 @@ class OnlineBenchmarkEvaluator(CapabilityEvaluator):
             self.history_path.parent.mkdir(parents=True, exist_ok=True)
             with self.history_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps({"optimizer_step": self.step_provider() if self.step_provider else None,
+                                         "session_id": self.session.session_id if self.session else None,
                                          "role": rows[0].get("role"), **result}) + "\n")
         return result

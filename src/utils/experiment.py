@@ -48,4 +48,7 @@ def experiment_plan(config: Mapping[str, Any]) -> dict[str, Any]:
         "training_roles": training_roles(config), "final_roles": ["forgetting", "final_math", "instruction"],
         "allocations": {task: source["allocations"] for task, source in suite["sources"].items()},
         "output_dir": config["project"]["output_dir"],
+        "restart_policy": config.get("checkpointing", {"interval_optimizer_steps": 25,
+                                                        "interval_seconds": 600, "keep_last": 3,
+                                                        "session_max_seconds": 0}),
     }
