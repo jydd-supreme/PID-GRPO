@@ -168,6 +168,17 @@ def normalize_row(task: str, source: Mapping[str, Any], raw: Mapping[str, Any]) 
     return row
 
 
+def _unique_questions(rows: Iterable[dict[str, Any]], task: str,
+                      source: Mapping[str, Any]) -> Iterable[dict[str, Any]]:
+    """Skip repeated source questions before sampling a fixed-size split."""
+    seen: set[str] = set()
+    for raw in rows:
+        key = normalize_row(task, source, raw)["question_hash"]
+        if key not in seen:
+            seen.add(key)
+            yield raw
+
+
 def materialize_roles(suite: Mapping[str, Any], roles: Iterable[str], *,
                       row_loader: Callable = remote_rows) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     requested = set(roles)
@@ -183,6 +194,11 @@ def materialize_roles(suite: Mapping[str, Any], roles: Iterable[str], *,
             continue
         rng = random.Random(int(digest([suite["seed"], task])[:16], 16))
         rows = row_loader(source)
+        # Fixed-size splits must contain the requested number of distinct
+        # questions. Full final splits keep every row and retain the duplicate
+        # guard below so an advertised full-set count cannot shrink silently.
+        if None not in allocations.values():
+            rows = _unique_questions(rows, task, source)
         if source["selection"] == "stratified":
             selected = _stratified(rows, allocations, rng)
         else:

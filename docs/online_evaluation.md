@@ -21,12 +21,13 @@
 
 MMLU 在 57 个学科间近似等额分层抽样，control 与 forgetting 各自覆盖所有学科。
 ARC 从 test 抽样，HellaSwag 从有标签的 validation 抽样；同一源的两个角色互斥。
-DeepMath 采用大小 1024 的缓冲随机采样，流式读取约 21,536 行，而非全库无偏抽样；
+DeepMath 采用大小 1024 的缓冲随机采样，通常流式读取至少 21,536 行，而非全库无偏抽样；
 只请求 question/final_answer/difficulty/topic，不载入三份长推理参考解答。
 其他小型评测源会扫描评测 split，在内存中分层或蓄水池抽样，不在磁盘保存 split。
 
 配置和种子决定固定样本；单独请求 control 时也会排除其对应的 forgetting 预留题。
-加载器检查所选题目的标准化文本哈希重复，失败时中止。它不是语义近重复检测，
+固定数量的角色在抽样前按题目标准化文本哈希去重，不足目标数量时中止；
+完整最终集和跨数据源的重复仍会中止。它不是语义近重复检测，
 DeepMath 上游的去污染声明也不等于此项目已经完成来源级泄漏审计。
 来源：[DeepMath](https://huggingface.co/datasets/zwhe99/DeepMath-103K)、
 [MMLU](https://huggingface.co/datasets/cais/mmlu)、

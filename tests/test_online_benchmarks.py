@@ -43,8 +43,35 @@ def test_stratified_control_and_heldout_cover_all_subjects():
 def test_duplicate_questions_and_undersized_sources_fail_closed():
     with pytest.raises(ValueError, match="too small"):
         materialize_roles(small_suite(), ["control"], row_loader=lambda _: fake_rows(None)[:2])
-    with pytest.raises(ValueError, match="duplicate question"):
+    with pytest.raises(ValueError, match="too small"):
         materialize_roles(small_suite(), ["control"], row_loader=lambda _: [fake_rows(None)[0]] * 30)
+
+
+@pytest.mark.parametrize("selection", ["buffered", "reservoir", "stratified"])
+def test_repeated_source_questions_are_replaced_before_fixed_size_splits(selection):
+    suite = small_suite()
+    source = suite["sources"]["mmlu"]
+    source.update(selection=selection, buffer_size=3)
+    raw = fake_rows(None)
+    repeated = [raw[0], raw[0], *raw[:15]]
+    rows, manifest = materialize_roles(suite, ["control", "forgetting"],
+                                       row_loader=lambda _: iter(repeated))
+    again, second = materialize_roles(suite, ["control", "forgetting"],
+                                      row_loader=lambda _: iter(repeated))
+    assert [len(rows[role]) for role in ("control", "forgetting")] == [6, 6]
+    assert len({row["question_hash"] for role in rows for row in rows[role]}) == 12
+    assert rows == again and manifest == second
+
+
+def test_full_split_still_rejects_duplicate_questions():
+    suite = {"version": 1, "seed": 42, "protocol": "pid-grpo-zero-shot-v1",
+             "aggregation": "sample_weighted", "sources": {
+                 "math": {"path": "test/math", "revision": "a" * 40,
+                          "kind": "math", "selection": "reservoir",
+                          "allocations": {"final_math": None}, "expected_rows": 2}}}
+    raw = {"question": "same question", "answer": "42"}
+    with pytest.raises(ValueError, match="duplicate question"):
+        materialize_roles(suite, ["final_math"], row_loader=lambda _: iter([raw, raw]))
 
 
 def test_final_only_request_does_not_read_training_or_control_sources():
