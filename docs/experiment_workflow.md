@@ -29,8 +29,10 @@ python -m pytest -q
 python scripts/run_experiment.py plan --config configs/experiments/deepmath_pid.yaml
 ```
 
-不联网、不加载模型。默认 2000 updates、K=100、G=4、batch=4、累积=8，
-每 update 为 8 个题组、32 个回答。生成上限 2048 tokens；这些是待实测的起点。
+不联网、不加载模型。正式配置为 1000 updates、K=100、G=4、batch=4、累积=8，
+每 update 为 8 个题组、32 个回答，总计约 8000 道不同训练题和 32000 个回答；
+冻结的 DeepMath 训练池仍为 20000 题，因此本预算不会遍历全部题目。
+生成上限 2048 tokens；这些是待实测的起点。
 显存、吞吐、零优势组比例和截断率须在服务器确认，不能据配置声称训练有效。
 
 服务器数据盘不是 `/root/autodl-tmp/GRPO` 时，在所有运行命令中一致添加
@@ -67,7 +69,10 @@ python scripts/run_experiment.py train --config configs/experiments/deepmath_fix
 python scripts/run_experiment.py train --config configs/experiments/deepmath_pid.yaml --seed 42 --enable-real-training
 ```
 
-三组共用训练、生成和评测预算，按 mode/seed 隔离输出。主配置触发 Hard/Invalid 后停止，
+三组共用 1000-update 训练、生成和评测预算，按 mode/seed 隔离输出。
+可先运行 PID 组，在第 100 步核对首次固定评测，再决定是否继续其余步数；
+该中途检查不改变已启动运行的配置，也不能把短跑检查点当作正式运行起点。
+主配置触发 Hard/Invalid 后停止，
 不执行改变 LR/K 的恢复续训。早停必须报告失败与实际成本，不能作为完整预算结果。
 可按相同配置继续 seed 43、44；已有 mode/seed 不可覆盖。
 以固定预算 last 为主、validation-selected best 为辅；固定 beta=.04 是初始对照，
