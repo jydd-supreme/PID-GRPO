@@ -63,7 +63,7 @@ python scripts/run_experiment.py train \
 ```
 
 每个新会话都执行这条续训命令，直到 `status=complete`。不用重新 freeze，不用增加 max_steps。
-若保存到 step 725，原目标为 1000，则继续 step 726 至 1000，不重新执行 1000 步。
+若保存到 step 325，原目标为 500，则继续 step 326 至 500，不重新执行 500 步。
 session 时间预算可以逐次通过 CLI 改变，它不属于冻结的训练超参数。
 
 续训会核对完整配置与数据身份，恢复模型/LoRA、optimizer、scheduler、TrainerState、
