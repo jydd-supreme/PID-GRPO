@@ -59,6 +59,9 @@ bash /mnt/afs/L202500740/GRPO/project/PID-GRPO/scripts/resume_server_pid.sh
 脚本使用持久化虚拟环境，检查保存的配置与终止状态，按最近完整快照续训，
 启动本机 Mihomo，测试 DeepMath 文件和模型配置的访问；官方入口不通时尝试镜像，
 最后在后台启动训练并追加日志。
+若某个数据集在自动选择的入口不稳定，可加
+`--hf-endpoint https://huggingface.co` 或 `--hf-endpoint https://hf-mirror.com`；
+脚本会在启动前检查训练所需数据集的 API。
 如果训练已在运行、已完成或被安全机制停止，不会重复启动或绕过安全停止。
 它根据容器已运行时间缩短本轮预算，尽量在平台四小时关机前保留一小时。
 代理配置仍保存在服务器 `/mnt/afs/L202500740/GRPO/proxy/config.yaml`，不要提交到仓库。

@@ -34,6 +34,12 @@ MODEL_PROBE_PATH = (
     "/Qwen/Qwen2.5-1.5B-Instruct/resolve/"
     "989aa7980e4cf806f80c7fef2b1adb7bc71aa306/config.json"
 )
+DATASET_API_PATHS = (
+    "/api/datasets/cais/mmlu/revision/c30699e8356da336a370243923dbaf21066bb9fe",
+    "/api/datasets/allenai/ai2_arc/revision/210d026faf9955653af8916fad021475a3f00453",
+    "/api/datasets/Rowan/hellaswag/revision/218ec52e09a7e7462a5400043bb9a69a41d06b76",
+)
+ENDPOINTS = ("https://huggingface.co", "https://hf-mirror.com")
 
 
 def read_json(path: Path) -> dict | None:
@@ -129,20 +135,23 @@ def probe_url(url: str, *, byte_range: bool) -> bool:
     return result.returncode == 0 and result.stdout.strip().endswith("206" if byte_range else "200")
 
 
-def probe_endpoint() -> str:
-    for endpoint in ("https://huggingface.co", "https://hf-mirror.com"):
-        if probe_url(endpoint + DATA_PROBE_PATH, byte_range=True) and probe_url(
-            endpoint + MODEL_PROBE_PATH, byte_range=False
-        ):
+def probe_endpoint(preferred: str | None = None) -> str:
+    candidates = (preferred,) if preferred else ENDPOINTS
+    for endpoint in candidates:
+        if (probe_url(endpoint + DATA_PROBE_PATH, byte_range=True)
+            and probe_url(endpoint + MODEL_PROBE_PATH, byte_range=False)
+            and all(probe_url(endpoint + path, byte_range=False) for path in DATASET_API_PATHS)):
             print(f"Data and model probes passed through {endpoint}.")
             return endpoint
-    raise RuntimeError("Neither Hugging Face endpoint passed data and model probes")
+    raise RuntimeError("No selected Hugging Face endpoint passed all data and model probes")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--hf-endpoint", choices=ENDPOINTS,
+                        help="force the official or mirror endpoint instead of automatic selection")
     args = parser.parse_args()
     os.umask(0o077)
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
@@ -197,7 +206,7 @@ def main() -> None:
             cwd=REPO, check=True,
         )
         start_proxy(root)
-        endpoint = probe_endpoint()
+        endpoint = probe_endpoint(args.hf_endpoint)
         environment = os.environ.copy()
         environment.update({
             "HTTP_PROXY": f"http://127.0.0.1:{PROXY_PORT}",

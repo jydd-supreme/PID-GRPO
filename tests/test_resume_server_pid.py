@@ -52,6 +52,20 @@ def test_endpoint_probe_uses_mirror_if_official_data_fails(monkeypatch):
 
     monkeypatch.setattr(launcher, "probe_url", probe)
     assert launcher.probe_endpoint() == "https://hf-mirror.com"
-    assert len(checked) == 3
+    assert len(checked) == 1 + 2 + len(launcher.DATASET_API_PATHS)
     assert checked[1][1] is True
     assert checked[2][1] is False
+
+
+def test_endpoint_probe_checks_mmlu_and_honors_override(monkeypatch):
+    checked = []
+
+    def probe(url, *, byte_range):
+        checked.append(url)
+        return True
+
+    monkeypatch.setattr(launcher, "probe_url", probe)
+    assert launcher.probe_endpoint("https://huggingface.co") == "https://huggingface.co"
+    assert len(checked) == 2 + len(launcher.DATASET_API_PATHS)
+    assert any("/cais/mmlu/" in url for url in checked)
+    assert all(url.startswith("https://huggingface.co") for url in checked)
