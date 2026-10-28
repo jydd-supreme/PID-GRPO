@@ -50,6 +50,22 @@ python scripts/run_experiment.py train \
 
 ## 重启后的续训
 
+服务器已完成首次正式 PID 训练后，可在每次重启后运行一条命令：
+
+```bash
+bash /mnt/afs/L202500740/GRPO/project/PID-GRPO/scripts/resume_server_pid.sh
+```
+
+脚本使用持久化虚拟环境，检查保存的配置与终止状态，按最近完整快照续训，
+启动本机 Mihomo，测试 DeepMath 文件和模型配置的访问；官方入口不通时尝试镜像，
+最后在后台启动训练并追加日志。
+如果训练已在运行、已完成或被安全机制停止，不会重复启动或绕过安全停止。
+它根据容器已运行时间缩短本轮预算，尽量在平台四小时关机前保留一小时。
+代理配置仍保存在服务器 `/mnt/afs/L202500740/GRPO/proxy/config.yaml`，不要提交到仓库。
+脚本仅用于当前 DeepMath PID 正式实验；首次启动和其他实验组仍使用各自命令。
+
+下面保留手动续训方法，便于排查问题。
+
 重新激活环境、进入同一代码目录；使用相同 config/root/seed，加上 `--resume`：
 
 ```bash
