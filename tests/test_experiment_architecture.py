@@ -63,6 +63,7 @@ def test_online_data_enters_training_without_reference_solution_leakage(tmp_path
     (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     config = load_config("configs/experiments/deepmath_pid.yaml")
     config["evaluation"].update(suite_config="suite.yaml", manifest_file="manifest.json")
+    config["storage"]["cache_dir"] = str(tmp_path / "cache")
     prepared = load_experiment_data(config, repository=tmp_path, row_loader=loader)
     assert len(prepared.splits["train_file"]) == 4
     assert "final_test_file" not in prepared.splits

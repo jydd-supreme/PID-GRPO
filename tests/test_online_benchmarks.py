@@ -1,10 +1,12 @@
 from copy import deepcopy
+import json
 
 import pytest
 
 from src.evaluation.online_data import (
     check_manifest, load_suite, materialize_roles, normalize_row, remote_rows,
 )
+from src.evaluation.selection_cache import SelectedSourceCache
 
 
 def small_suite(selection="reservoir"):
@@ -113,6 +115,70 @@ def test_remote_reader_uses_streaming_and_parquet_column_projection(monkeypatch)
     assert calls[0][1]["streaming"] is True
     assert calls[0][1]["revision"] == source["revision"]
     assert calls[0][1]["columns"] == ["question", "final_answer", "difficulty", "topic"]
+
+
+def test_selected_source_cache_survives_later_source_failure(tmp_path):
+    suite = small_suite()
+    suite["sources"]["mmlu2"] = {
+        **suite["sources"]["mmlu"], "path": "test/mmlu2", "revision": "b" * 40,
+    }
+    cache = SelectedSourceCache(tmp_path / "selected")
+    calls = []
+
+    def interrupted_loader(source):
+        calls.append(source["path"])
+        if source["path"] == "test/mmlu2":
+            raise ConnectionError("network reset")
+        return fake_rows(source)
+
+    with pytest.raises(ConnectionError, match="network reset"):
+        materialize_roles(suite, ["control"], row_loader=interrupted_loader,
+                          source_cache=cache)
+    assert calls == ["test/mmlu", "test/mmlu2"]
+    assert cache._path(suite, "mmlu").is_file()
+
+    def remaining_loader(source):
+        calls.append(source["path"])
+        assert source["path"] == "test/mmlu2"
+        return [{**row, "question": "second " + row["question"]}
+                for row in fake_rows(source)]
+
+    rows, manifest = materialize_roles(suite, ["control"], row_loader=remaining_loader,
+                                       source_cache=cache)
+    assert calls[-1:] == ["test/mmlu2"]
+    again, second = materialize_roles(
+        suite, ["control"], source_cache=cache,
+        row_loader=lambda _: pytest.fail("cache hit must not request the network"),
+    )
+    assert rows == again and manifest == second
+
+
+def test_selected_source_cache_rejects_modified_content(tmp_path):
+    suite = small_suite()
+    cache = SelectedSourceCache(tmp_path)
+    materialize_roles(suite, ["control"], row_loader=fake_rows, source_cache=cache)
+    path = cache._path(suite, "mmlu")
+    payload = json.loads(path.read_text())
+    payload["selected"]["control"][0]["prompt"] = "tampered"
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="cached row content mismatch"):
+        materialize_roles(suite, ["control"], source_cache=cache,
+                          row_loader=lambda _: pytest.fail("must not refetch silently"))
+
+
+def test_selected_source_cache_does_not_persist_manifest_mismatch(tmp_path):
+    suite = small_suite()
+    _, frozen = materialize_roles(suite, ["control"], row_loader=fake_rows)
+    cache = SelectedSourceCache(tmp_path, expected_manifest=frozen)
+
+    def changed_rows(source):
+        return [{**row, "question": "changed " + row["question"]}
+                for row in fake_rows(source)]
+
+    with pytest.raises(ValueError, match="differs from frozen manifest"):
+        materialize_roles(suite, ["control"], row_loader=changed_rows,
+                          source_cache=cache)
+    assert not cache._path(suite, "mmlu").exists()
 
 
 def test_arc_numeric_labels_and_hellaswag_normalization():

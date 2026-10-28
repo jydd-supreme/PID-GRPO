@@ -3,8 +3,11 @@
 import json
 
 import pytest
+import yaml
 
 from scripts import resume_server_pid as launcher
+from src.evaluation.online_data import materialize_roles
+from src.evaluation.selection_cache import SelectedSourceCache
 
 run_state = launcher.run_state
 session_budget = launcher.session_budget
@@ -52,7 +55,7 @@ def test_endpoint_probe_uses_mirror_if_official_data_fails(monkeypatch):
 
     monkeypatch.setattr(launcher, "probe_url", probe)
     assert launcher.probe_endpoint() == "https://hf-mirror.com"
-    assert len(checked) == 1 + 2 + len(launcher.DATASET_API_PATHS)
+    assert len(checked) == 1 + len(launcher.SOURCE_PROBES) + 1
     assert checked[1][1] is True
     assert checked[2][1] is False
 
@@ -66,6 +69,35 @@ def test_endpoint_probe_checks_mmlu_and_honors_override(monkeypatch):
 
     monkeypatch.setattr(launcher, "probe_url", probe)
     assert launcher.probe_endpoint("https://huggingface.co") == "https://huggingface.co"
-    assert len(checked) == 2 + len(launcher.DATASET_API_PATHS)
+    assert len(checked) == 1 + len(launcher.SOURCE_PROBES)
     assert any("/cais/mmlu/" in url for url in checked)
     assert all(url.startswith("https://huggingface.co") for url in checked)
+
+
+def test_complete_frozen_selection_skips_future_dataset_probes(tmp_path, monkeypatch):
+    suite = {"version": 1, "seed": 42, "protocol": "pid-grpo-zero-shot-v1",
+             "aggregation": "sample_weighted", "sources": {
+                 "mmlu": {"path": "test/mmlu", "name": "all", "revision": "a" * 40,
+                          "split": "test", "kind": "mmlu", "selection": "reservoir",
+                          "allocations": {"control": 2, "forgetting": 2}}}}
+    raw = [{"question": f"q{i}", "subject": "science", "choices": ["A", "B"],
+            "answer": i % 2} for i in range(8)]
+    _, manifest = materialize_roles(suite, ["control"], row_loader=lambda _: raw)
+    (tmp_path / "suite.yaml").write_text(yaml.safe_dump(suite))
+    write_json(tmp_path / "manifest.json", manifest)
+    config = {"evaluation": {"suite_config": "suite.yaml", "manifest_file": "manifest.json"},
+              "storage": {"cache_dir": str(tmp_path / "cache")},
+              "data": {"backend": "online_suite"}}
+    monkeypatch.setattr(launcher, "REPO", tmp_path)
+    assert not launcher.training_cache_complete(config)
+    cache = SelectedSourceCache(tmp_path / "cache/online_selections", expected_manifest=manifest)
+    materialize_roles(suite, ["control"], row_loader=lambda _: raw, source_cache=cache)
+    assert launcher.training_cache_complete(config)
+
+
+def test_endpoint_probe_only_checks_uncached_sources(monkeypatch):
+    checked = []
+    monkeypatch.setattr(launcher, "probe_url", lambda url, **kwargs: checked.append(url) or True)
+    launcher.probe_endpoint("https://huggingface.co", required_tasks=["mmlu"])
+    assert len(checked) == 2
+    assert "/cais/mmlu/" in checked[0]

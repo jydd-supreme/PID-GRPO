@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from src.data.dataset_builder import load_local_jsonl
 from src.evaluation.online_data import check_manifest, digest, load_suite, materialize_roles
+from src.evaluation.selection_cache import SelectedSourceCache
 
 
 @dataclass
@@ -56,7 +57,9 @@ def load_experiment_data(config: Mapping[str, Any], *, repository: Path | None =
     if expected["suite_sha256"] != digest(suite):
         raise ValueError("suite configuration differs from frozen manifest")
     kwargs = {"row_loader": row_loader} if row_loader is not None else {}
-    online, manifest = materialize_roles(suite, training_roles(config), **kwargs)
+    cache = SelectedSourceCache(Path(config["storage"]["cache_dir"]) / "online_selections",
+                                expected_manifest=expected)
+    online, manifest = materialize_roles(suite, training_roles(config), source_cache=cache, **kwargs)
     check_manifest(expected, manifest)
     online_training = data.get("backend", "local_jsonl") == "online_suite"
     train = ([training_record(row) for row in online["train"]] if online_training

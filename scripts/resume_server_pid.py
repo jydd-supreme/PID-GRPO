@@ -19,6 +19,9 @@ sys.path.insert(0, str(REPO))
 
 from src.utils.config import load_config
 from src.utils.experiment import runtime_config
+from src.data.experiment_data import training_roles
+from src.evaluation.online_data import digest, load_suite
+from src.evaluation.selection_cache import SelectedSourceCache
 
 CONFIG = REPO / "configs/experiments/deepmath_pid.yaml"
 PROXY_PORT = 7890
@@ -34,11 +37,12 @@ MODEL_PROBE_PATH = (
     "/Qwen/Qwen2.5-1.5B-Instruct/resolve/"
     "989aa7980e4cf806f80c7fef2b1adb7bc71aa306/config.json"
 )
-DATASET_API_PATHS = (
-    "/api/datasets/cais/mmlu/revision/c30699e8356da336a370243923dbaf21066bb9fe",
-    "/api/datasets/allenai/ai2_arc/revision/210d026faf9955653af8916fad021475a3f00453",
-    "/api/datasets/Rowan/hellaswag/revision/218ec52e09a7e7462a5400043bb9a69a41d06b76",
-)
+SOURCE_PROBES = {
+    "deepmath": (DATA_PROBE_PATH, True),
+    "mmlu": ("/api/datasets/cais/mmlu/revision/c30699e8356da336a370243923dbaf21066bb9fe", False),
+    "arc_challenge": ("/api/datasets/allenai/ai2_arc/revision/210d026faf9955653af8916fad021475a3f00453", False),
+    "hellaswag": ("/api/datasets/Rowan/hellaswag/revision/218ec52e09a7e7462a5400043bb9a69a41d06b76", False),
+}
 ENDPOINTS = ("https://huggingface.co", "https://hf-mirror.com")
 
 
@@ -135,15 +139,36 @@ def probe_url(url: str, *, byte_range: bool) -> bool:
     return result.returncode == 0 and result.stdout.strip().endswith("206" if byte_range else "200")
 
 
-def probe_endpoint(preferred: str | None = None) -> str:
+def probe_endpoint(preferred: str | None = None, *, required_tasks: list[str] | None = None) -> str:
     candidates = (preferred,) if preferred else ENDPOINTS
+    tasks = required_tasks if required_tasks is not None else list(SOURCE_PROBES)
+    if any(task not in SOURCE_PROBES for task in tasks):
+        raise RuntimeError("no network probe configured for a required training source")
     for endpoint in candidates:
-        if (probe_url(endpoint + DATA_PROBE_PATH, byte_range=True)
-            and probe_url(endpoint + MODEL_PROBE_PATH, byte_range=False)
-            and all(probe_url(endpoint + path, byte_range=False) for path in DATASET_API_PATHS)):
+        if (all(probe_url(endpoint + SOURCE_PROBES[task][0],
+                          byte_range=SOURCE_PROBES[task][1]) for task in tasks)
+            and probe_url(endpoint + MODEL_PROBE_PATH, byte_range=False)):
             print(f"Data and model probes passed through {endpoint}.")
             return endpoint
     raise RuntimeError("No selected Hugging Face endpoint passed all data and model probes")
+
+
+def uncached_training_sources(config: dict) -> list[str]:
+    evaluation = config["evaluation"]
+    suite = load_suite(REPO / evaluation["suite_config"])
+    expected = read_json(REPO / evaluation["manifest_file"])
+    if expected is None or expected["suite_sha256"] != digest(suite):
+        raise RuntimeError("frozen benchmark manifest does not match the suite")
+    cache = SelectedSourceCache(Path(config["storage"]["cache_dir"]) / "online_selections",
+                                expected_manifest=expected)
+    roles = set(training_roles(config))
+    return [task for task, source in suite["sources"].items()
+            if roles.intersection(source["allocations"])
+            and cache.load(suite, task, source) is None]
+
+
+def training_cache_complete(config: dict) -> bool:
+    return not uncached_training_sources(config)
 
 
 def main() -> None:
@@ -206,7 +231,12 @@ def main() -> None:
             cwd=REPO, check=True,
         )
         start_proxy(root)
-        endpoint = probe_endpoint(args.hf_endpoint)
+        missing_sources = uncached_training_sources(config)
+        if not missing_sources:
+            endpoint = args.hf_endpoint or ENDPOINTS[0]
+            print("Frozen training/control rows are cached; skipping dataset probes.")
+        else:
+            endpoint = probe_endpoint(args.hf_endpoint, required_tasks=missing_sources)
         environment = os.environ.copy()
         environment.update({
             "HTTP_PROXY": f"http://127.0.0.1:{PROXY_PORT}",

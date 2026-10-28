@@ -88,6 +88,10 @@ session 时间预算可以逐次通过 CLI 改变，它不属于冻结的训练�
 续训会核对完整配置与数据身份，恢复模型/LoRA、optimizer、scheduler、TrainerState、
 Python/NumPy/Torch/CUDA RNG、PID/Guard、beta、控制计数、活动 checkpoint 分支和恢复倍率。
 原始 step-0 baseline 始终沿用，不能用中断模型重新定义安全阈值。
+训练所需的在线题目按来源缓存于数据盘；已成功选取并核对冻结 manifest 的来源，
+后续重启不再依赖其在线接口。首次建立缓存仍需逐个读取来源。
+所有训练/控制来源的缓存就绪后，一键脚本也会跳过数据集联网探测；
+模型仍通过原有 Hugging Face 缓存/入口加载。
 采样器按 seed/epoch 重建锁定版 TRL 的排列序列，再由 Trainer 跳过已完成数据位置。
 这用于恢复同一实验，不支持中途更换模型、数据、batch、梯度累积、PID 参数或总步数。
 

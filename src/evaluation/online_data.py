@@ -180,7 +180,8 @@ def _unique_questions(rows: Iterable[dict[str, Any]], task: str,
 
 
 def materialize_roles(suite: Mapping[str, Any], roles: Iterable[str], *,
-                      row_loader: Callable = remote_rows) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+                      row_loader: Callable = remote_rows,
+                      source_cache: Any = None) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     requested = set(roles)
     if not requested or not requested <= ROLES:
         raise ValueError("unknown or empty evaluation roles")
@@ -192,37 +193,41 @@ def materialize_roles(suite: Mapping[str, Any], roles: Iterable[str], *,
         allocations = source["allocations"]
         if not requested.intersection(allocations):
             continue
-        rng = random.Random(int(digest([suite["seed"], task])[:16], 16))
-        rows = row_loader(source)
-        # Fixed-size splits must contain the requested number of distinct
-        # questions. Full final splits keep every row and retain the duplicate
-        # guard below so an advertised full-set count cannot shrink silently.
-        if None not in allocations.values():
-            rows = _unique_questions(rows, task, source)
-        if source["selection"] == "stratified":
-            selected = _stratified(rows, allocations, rng)
-        else:
-            total = None if None in allocations.values() else sum(allocations.values())
-            pool = (_buffered(rows, total, source["buffer_size"], rng)
-                    if source["selection"] == "buffered" else _reservoir(rows, total, rng))
-            if source.get("expected_rows") is not None and len(pool) != source["expected_rows"]:
-                raise ValueError(f"{task}: source count changed, got {len(pool)}")
-            selected = {}
-            cursor = 0
-            for role, count in allocations.items():
-                selected[role] = pool[cursor:cursor + count] if count is not None else pool
-                cursor += count or len(pool)
+        selected = source_cache.load(suite, task, source) if source_cache else None
+        if selected is None:
+            rng = random.Random(int(digest([suite["seed"], task])[:16], 16))
+            rows = row_loader(source)
+            # Fixed-size splits must contain the requested number of distinct
+            # questions. Full final splits keep every row and retain the duplicate
+            # guard below so an advertised full-set count cannot shrink silently.
+            if None not in allocations.values():
+                rows = _unique_questions(rows, task, source)
+            if source["selection"] == "stratified":
+                raw_selected = _stratified(rows, allocations, rng)
+            else:
+                total = None if None in allocations.values() else sum(allocations.values())
+                pool = (_buffered(rows, total, source["buffer_size"], rng)
+                        if source["selection"] == "buffered" else _reservoir(rows, total, rng))
+                if source.get("expected_rows") is not None and len(pool) != source["expected_rows"]:
+                    raise ValueError(f"{task}: source count changed, got {len(pool)}")
+                raw_selected = {}
+                cursor = 0
+                for role, count in allocations.items():
+                    raw_selected[role] = pool[cursor:cursor + count] if count is not None else pool
+                    cursor += count or len(pool)
+            selected = {role: [normalize_row(task, source, raw) for raw in values]
+                        for role, values in raw_selected.items()}
+            if source_cache:
+                source_cache.save(suite, task, source, selected)
         # Check all allocations, even when only one role was requested.
         for role, values in selected.items():
-            for raw in values:
-                row = normalize_row(task, source, raw)
+            for row in values:
                 key = row["question_hash"]
                 if key in seen:
                     raise ValueError(f"duplicate question in {seen[key]} and {role}: {row['id']}")
                 seen[key] = role
                 if role in requested:
-                    row["role"] = role
-                    result[role].append(row)
+                    result[role].append({**row, "role": role})
     for role, values in result.items():
         if not values:
             raise ValueError(f"empty role: {role}")
